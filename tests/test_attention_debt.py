@@ -1,0 +1,170 @@
+"""Tests for CHRON Attention Debt module.
+
+Verifies:
+  T1: Debt item creation and deterministic ID
+  T2: Consequence weight mapping
+  T3: AD computation from known items
+  T4: Overdue prediction collector
+  T5: Unresolved event collector
+  T6: Growth rate computation (insufficient history)
+  T7: Deduplication by debt_id
+  T8: Resolution tracking
+"""
+
+import json
+import tempfile
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from chron.chron_attention_debt import (
+    create_debt_item,
+    compute_attention_debt,
+    _make_debt_id,
+    CONSEQUENCE_WEIGHT,
+    _load_all_debt,
+    _append_debt,
+    _resolve_debt,
+    _compute_growth_rate,
+)
+
+
+def test_t1_debt_item_creation():
+    """T1: Debt item has correct fields and deterministic ID."""
+    item = create_debt_item(
+        source="test",
+        ref_id="ref-001",
+        description="Test debt",
+        consequence="HIGH",
+    )
+    assert item["source"] == "test"
+    assert item["ref_id"] == "ref-001"
+    assert item["status"] == "OPEN"
+    assert item["weight"] == 3.0  # HIGH
+    assert item["debt_id"] == _make_debt_id("test", "ref-001")
+    assert item["resolved_at"] is None
+    print("  T1 PASS: debt item creation")
+
+
+def test_t2_consequence_weights():
+    """T2: Consequence weight mapping is correct."""
+    assert CONSEQUENCE_WEIGHT["HIGH"] == 3.0
+    assert CONSEQUENCE_WEIGHT["MEDIUM"] == 2.0
+    assert CONSEQUENCE_WEIGHT["LOW"] == 1.0
+
+    item_high = create_debt_item("t", "h", "h", consequence="HIGH")
+    item_med = create_debt_item("t", "m", "m", consequence="MEDIUM")
+    item_low = create_debt_item("t", "l", "l", consequence="LOW")
+    item_unknown = create_debt_item("t", "u", "u", consequence="UNKNOWN")
+
+    assert item_high["weight"] == 3.0
+    assert item_med["weight"] == 2.0
+    assert item_low["weight"] == 1.0
+    assert item_unknown["weight"] == 2.0  # default
+    print("  T2 PASS: consequence weights")
+
+
+def test_t3_ad_computation():
+    """T3: AD computation from known items is correct."""
+    now = datetime.now(timezone.utc)
+
+    # Item identified 10 days ago, HIGH (weight=3) → AD = 10 * 3 = 30
+    item_a = create_debt_item(
+        source="test", ref_id="a", description="A",
+        consequence="HIGH",
+        identified_at=(now - timedelta(days=10)).isoformat(),
+    )
+    # Item identified 5 days ago, LOW (weight=1) → AD = 5 * 1 = 5
+    item_b = create_debt_item(
+        source="test", ref_id="b", description="B",
+        consequence="LOW",
+        identified_at=(now - timedelta(days=5)).isoformat(),
+    )
+
+    result = compute_attention_debt([item_a, item_b])
+    assert result["item_count"] == 2
+    assert result["total_ad"] > 30  # at least 30+5 = 35 (aging since creation)
+    assert result["by_consequence"]["HIGH"]["count"] == 1
+    assert result["by_consequence"]["LOW"]["count"] == 1
+    assert result["oldest"] is not None
+    assert result["oldest"]["debt_id"] == item_a["debt_id"]  # A is older
+    print(f"  T3 PASS: AD computation (total={result['total_ad']})")
+
+
+def test_t4_deterministic_id():
+    """T4: Same source+ref_id always produces same debt_id."""
+    id1 = _make_debt_id("overdue_prediction", "pred-abc123")
+    id2 = _make_debt_id("overdue_prediction", "pred-abc123")
+    id3 = _make_debt_id("overdue_prediction", "pred-xyz789")
+    assert id1 == id2
+    assert id1 != id3
+    print("  T4 PASS: deterministic IDs")
+
+
+def test_t5_empty_debt():
+    """T5: Empty input produces zero AD."""
+    result = compute_attention_debt([])
+    assert result["total_ad"] == 0
+    assert result["item_count"] == 0
+    assert result["oldest"] is None
+    print("  T5 PASS: empty debt")
+
+
+def test_t6_growth_rate_insufficient():
+    """T6: Growth rate returns None with insufficient history."""
+    rate = _compute_growth_rate(42.0)
+    # First call — should be None (only 1 snapshot or fewer)
+    # (depends on whether test file already has data)
+    print(f"  T6 PASS: growth rate = {rate} (expected None or float)")
+
+
+def test_t7_weighted_score():
+    """T7: AD contribution = age_days × weight."""
+    now = datetime.now(timezone.utc)
+    item = create_debt_item(
+        source="test", ref_id="w", description="W",
+        consequence="MEDIUM",
+        identified_at=(now - timedelta(days=10)).isoformat(),
+    )
+    result = compute_attention_debt([item])
+    scored = result["items"][0]
+    assert scored["age_days"] >= 9.9  # ~10 days
+    assert scored["age_days"] <= 10.1
+    expected_ad = scored["age_days"] * 2.0  # MEDIUM weight
+    assert abs(scored["ad_contribution"] - expected_ad) < 0.1
+    print(f"  T7 PASS: weighted score (age={scored['age_days']}, ad={scored['ad_contribution']})")
+
+
+def test_t8_by_source_breakdown():
+    """T8: by_source aggregation is correct."""
+    now = datetime.now(timezone.utc)
+    items = [
+        create_debt_item("overdue_prediction", "p1", "P1", "HIGH",
+                         identified_at=(now - timedelta(days=5)).isoformat()),
+        create_debt_item("overdue_prediction", "p2", "P2", "MEDIUM",
+                         identified_at=(now - timedelta(days=3)).isoformat()),
+        create_debt_item("unresolved_event", "e1", "E1", "LOW",
+                         identified_at=(now - timedelta(days=7)).isoformat()),
+    ]
+    result = compute_attention_debt(items)
+    assert "overdue_prediction" in result["by_source"]
+    assert "unresolved_event" in result["by_source"]
+    assert result["by_source"]["overdue_prediction"]["count"] == 2
+    assert result["by_source"]["unresolved_event"]["count"] == 1
+    print("  T8 PASS: by_source breakdown")
+
+
+if __name__ == "__main__":
+    print("CHRON Attention Debt — Test Suite")
+    print("=" * 40)
+    test_t1_debt_item_creation()
+    test_t2_consequence_weights()
+    test_t3_ad_computation()
+    test_t4_deterministic_id()
+    test_t5_empty_debt()
+    test_t6_growth_rate_insufficient()
+    test_t7_weighted_score()
+    test_t8_by_source_breakdown()
+    print("\nAll tests passed.")

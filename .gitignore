@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.backup-*
+verify_log.jsonl
+verify_log.txt
+data/*.jsonl
+data/*.json
+!data/.gitkeep
