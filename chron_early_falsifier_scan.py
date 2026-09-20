@@ -9,6 +9,7 @@ State vocabulary (deliberately not collapsing into FALSIFIED):
 
     FALSIFIER_ALREADY_SATISFIED  — condition already contradicted; date not reached
     SIGNAL_PRESENT               — condition still consistent with the claim
+    HUMAN_WITNESS_REQUIRED       — audience=arif and no machine probe
     AWAITING_EVIDENCE            — no probe registered for this claim's source
     DUE                          — date reached; defer to the normal verifier
 
@@ -23,10 +24,14 @@ import json
 import pathlib
 import subprocess
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 PREDICTIONS = pathlib.Path("/root/chron/data/predictions.jsonl")
 OIL_SNAPSHOT = "http://127.0.0.1:3457/api/snapshot"
+F13_PACKETS = pathlib.Path("/root/AAA/governance/f13-packets")
+# Inclusive of W38-3 (mtime 2026-09-16 03:03:56 MYT). The claim's own
+# verifier named that file as baseline, not as a new packet.
+PACKET_BASELINE = datetime(2026, 9, 16, 3, 4, tzinfo=timezone(timedelta(hours=8)))
 
 
 def _parse(ts):
@@ -76,7 +81,56 @@ def probe_brent_band(claim: str):
     return state, observed
 
 
-PROBES = (probe_systemd_venv, probe_brent_band)
+def probe_weekly_packet(claim: str):
+    """Claim: f13-weekly-packet produces 0 new packet files by 2026-09-28.
+
+    Baseline on disk: 3 files, newest mtime 2026-09-16 03:03 MYT.
+    Falsifier: any file newer than that baseline.
+    """
+    if "f13-weekly-packet" not in claim and "f13-packet" not in claim:
+        return None
+    if not F13_PACKETS.is_dir():
+        return "AWAITING_EVIDENCE", "f13-packets dir missing"
+    newer = []
+    for p in F13_PACKETS.iterdir():
+        if not p.is_file():
+            continue
+        mtime = datetime.fromtimestamp(p.stat().st_mtime, timezone.utc)
+        if mtime > PACKET_BASELINE:
+            newer.append(p.name)
+    observed = f"{len(newer)} packet file(s) newer than baseline W38-3 (2026-09-16 03:03:56 MYT)"
+    state = "FALSIFIER_ALREADY_SATISFIED" if newer else "SIGNAL_PRESENT"
+    return state, observed
+
+
+def probe_tree777_crontab(claim: str):
+    """Claim: TREE777 per-agent weekly anchor remains absent from every crontab."""
+    if "TREE777" not in claim and "tree777" not in claim:
+        return None
+    hits = []
+    for path in ("/etc/cron.d", "/etc/crontab"):
+        out = subprocess.run(
+            ["bash", "-lc", f"grep -rni 'tree777' {path} 2>/dev/null || true"],
+            capture_output=True, text=True, timeout=30,
+        )
+        text = (out.stdout or "").strip()
+        if text:
+            hits.append(path)
+    root_cron = subprocess.run(
+        ["bash", "-lc", "crontab -l 2>/dev/null | grep -i tree777 || true"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if (root_cron.stdout or "").strip():
+        hits.append("root-crontab")
+    observed = (
+        f"tree777 matches in: {', '.join(hits)}" if hits else "tree777 absent from crontab surfaces"
+    )
+    # Claim asserts ABSENCE. Falsifier: a match appears.
+    state = "FALSIFIER_ALREADY_SATISFIED" if hits else "SIGNAL_PRESENT"
+    return state, observed
+
+
+PROBES = (probe_systemd_venv, probe_brent_band, probe_weekly_packet, probe_tree777_crontab)
 
 
 def main() -> int:
@@ -101,14 +155,23 @@ def main() -> int:
             if result:
                 state, observed = result
                 break
+        if state == "AWAITING_EVIDENCE" and (row.get("audience") or "") == "arif":
+            state, observed = "HUMAN_WITNESS_REQUIRED", "audience=arif; no machine probe"
         buckets.setdefault(state, []).append((row, observed))
 
     n = sum(len(v) for v in buckets.values())
     awaiting = len(buckets.get("AWAITING_EVIDENCE", []))
+    human = len(buckets.get("HUMAN_WITNESS_REQUIRED", []))
     early = len(buckets.get("FALSIFIER_ALREADY_SATISFIED", []))
     print(f"CHRON EARLY-FALSIFIER SCAN — {now.isoformat(timespec='seconds')}")
     print(f"unscored predictions with a verify date: {n}\n")
-    for state in ("FALSIFIER_ALREADY_SATISFIED", "DUE", "SIGNAL_PRESENT", "AWAITING_EVIDENCE"):
+    for state in (
+        "FALSIFIER_ALREADY_SATISFIED",
+        "DUE",
+        "SIGNAL_PRESENT",
+        "HUMAN_WITNESS_REQUIRED",
+        "AWAITING_EVIDENCE",
+    ):
         items = buckets.get(state, [])
         print(f"[{state}] {len(items)}")
         for row, observed in items:
@@ -123,8 +186,9 @@ def main() -> int:
         "unscored": n,
         "early_falsifier": early,
         "awaiting_machine_probe": awaiting,
+        "human_witness_required": human,
         "share_unprobed": (awaiting / n) if n else None,
-        "note": "AWAITING_EVIDENCE = no registered machine probe. Some claims still attach to a real-world date (budget day, BNM). That is HUMAN_WITNESS_REQUIRED, not unfalsifiable. EARLY_FALSIFIER_SATISFIED != FALSIFIED.",
+        "note": "AWAITING_EVIDENCE = no registered machine probe AND not audience=arif. HUMAN_WITNESS_REQUIRED = audience=arif with no machine probe. Some calendar claims (budget day, BNM) stay human. EARLY_FALSIFIER_SATISFIED != FALSIFIED.",
         "buckets": {
             k: [
                 {"prediction_id": r.get("prediction_id"), "claim": (r.get("claim") or "")[:120], "observed": o}
