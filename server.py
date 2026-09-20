@@ -42,6 +42,14 @@ from chron.chron_learn import extract_lessons, load_lessons, get_candidates
 from chron.chron_prediction import verify_prediction, create_prediction
 from chron.chron_episode import verify_from_result, predict_from_prediction
 from chron.chron_attention_debt import get_attention_debt, get_ad_summary
+from chron.chron_proxy_reality import (
+    register_pair,
+    list_pairs,
+    observe as pr_observe,
+    compute_correlation,
+    compute_all as pr_compute_all,
+    seed_defaults as pr_seed_defaults,
+)
 
 mcp = FastMCP(
     "CHRON",
@@ -171,8 +179,35 @@ def chron_active_events(audience: str = "all") -> dict:
     }
 
 
+def _resolve_prediction_audience(pred: dict) -> str:
+    """Resolve the effective audience of one prediction.
+
+    receipt rcpt-2026-09-19-chron-audience-leak-fix
+    evidence /root/chron/data/predictions.jsonl  (live store, read-only)
+    evidence /root/AAA/scripts/chron_events.json (event store, read-only)
+
+    Resolution order:
+      1. explicit `audience` on the prediction row
+      2. the audience of the source event named by `source_id`
+      3. UNRESOLVED — and an unresolved row is never shared.
+    """
+    explicit = pred.get("audience")
+    if explicit in ("arif", "syed", "both"):
+        return explicit
+    sid = pred.get("source_id")
+    if sid:
+        try:
+            data = json.loads(Path("/root/AAA/scripts/chron_events.json").read_text())
+            for e in data.get("events", []):
+                if e.get("id") == sid and e.get("audience") in ("arif", "syed", "both"):
+                    return e["audience"]
+        except (OSError, json.JSONDecodeError):
+            pass
+    return "unresolved"
+
+
 @mcp.tool()
-def chron_active_predictions(limit: int = 50, source_id: str = "") -> dict:
+def chron_active_predictions(limit: int = 50, source_id: str = "", audience: str = "all") -> dict:
     """Get all active (unverified) predictions.
 
     The institution's current expectations about the future.
@@ -180,13 +215,46 @@ def chron_active_predictions(limit: int = 50, source_id: str = "") -> dict:
     Args:
         limit: Max predictions to return (default 50)
         source_id: Filter by source event ID (e.g. 'budget-2027'). Empty = all.
+        audience: Privacy filter — same contract as chron_active_events:
+            'arif'  → predictions addressed to arif + shared (audience in ['arif','both'])
+            'syed'  → predictions addressed to syed + shared (audience in ['syed','both'])
+            'both'  → SHARED-ONLY (audience == 'both'). NOT a superset — this is the
+                      correct value for any two-person surface such as the ALPHA-ZEN card.
+            'all'   → EVERY prediction regardless of audience (full inventory).
+            Default: 'all'.
+
+    PRIVACY LAW (F13, 2026-09-19) — receipt rcpt-2026-09-19-chron-audience-leak-fix:
+        A prediction whose audience cannot be resolved is NOT shared. When a
+        specific audience is requested, unresolved rows are EXCLUDED, never
+        included by default. Resolution order: explicit `audience` on the row,
+        else the audience of the source event named by `source_id`, else
+        UNRESOLVED (excluded). The number excluded is returned in
+        `audience_unresolved` so the gap is visible rather than silent.
     """
     preds = get_active()
     if source_id:
         preds = [p for p in preds if p.get("source_id") == source_id]
+
+    unresolved: list = []
+    if audience != "all":
+        resolved = []
+        for p in preds:
+            eff = _resolve_prediction_audience(p)
+            if eff == "unresolved":
+                unresolved.append(p.get("prediction_id"))
+                continue
+            if audience == "both":
+                if eff == "both":
+                    resolved.append({**p, "effective_audience": eff})
+            elif eff in (audience, "both"):
+                resolved.append({**p, "effective_audience": eff})
+        preds = resolved
+
     total = len(preds)
     preds = preds[:limit]
     return {
+        "audience": audience,
+        "audience_unresolved": unresolved,
         "predictions": preds,
         "count": len(preds),
         "total_active": total,
@@ -514,6 +582,130 @@ def chron_create_event(
         "title": title,
         "target_date": target_date,
         "total_events": len(events),
+        "query_time": _now_iso(),
+    }
+
+
+# ───────────────────────── PROXY-REALITY CORRELATION ─────────────────────────
+
+
+@mcp.tool()
+def chron_proxy_reality_register(
+    organ: str,
+    proxy_name: str,
+    proxy_description: str,
+    reality_name: str,
+    reality_description: str,
+    divergence_threshold: float = 0.3,
+    diagnostic_question: str = "",
+) -> dict:
+    """Register a proxy→reality pair for correlation tracking.
+
+    Each organ declares what proxy it measures and what reality it should
+    defend. CHRON tracks observations over time and flags divergence:
+    proxy improving while reality degrades = GAMING.
+
+    Args:
+        organ: organ name (e.g. 'GEOX', 'WEALTH', '333-AGI')
+        proxy_name: short metric name (e.g. 'test_pass_rate')
+        proxy_description: what the proxy measures
+        reality_name: short reality name (e.g. 'intended_outcome')
+        reality_description: what reality it should represent
+        divergence_threshold: min delta to flag divergence (0.0-1.0)
+        diagnostic_question: the 'every X must ask' question
+
+    Returns:
+        The registered pair record.
+    """
+    pair = register_pair(
+        organ=organ,
+        proxy_name=proxy_name,
+        proxy_description=proxy_description,
+        reality_name=reality_name,
+        reality_description=reality_description,
+        divergence_threshold=divergence_threshold,
+        diagnostic_question=diagnostic_question,
+    )
+    return {
+        "registered": True,
+        "pair": pair,
+        "query_time": _now_iso(),
+    }
+
+
+@mcp.tool()
+def chron_proxy_reality_observe(
+    pair_id: str,
+    metric_type: str,
+    value: float,
+    unit: str = "",
+    source: str = "",
+    evidence_ref: str = "",
+) -> dict:
+    """Record a proxy or reality observation for a registered pair.
+
+    Call this when you have a measured value for either the proxy metric
+    or the reality metric. CHRON computes correlation at query time.
+
+    Args:
+        pair_id: the proxy-reality pair ID (from chron_proxy_reality_register or list)
+        metric_type: 'proxy' or 'reality'
+        value: observed value (normalize to 0.0-1.0 where possible)
+        unit: unit of measurement (display only)
+        source: what tool/system produced this value
+        evidence_ref: path or URL to supporting evidence
+
+    Returns:
+        The observation record.
+    """
+    try:
+        obs = pr_observe(
+            pair_id=pair_id,
+            metric_type=metric_type,
+            value=value,
+            unit=unit,
+            source=source,
+            evidence_ref=evidence_ref,
+        )
+        return {
+            "recorded": True,
+            "observation": obs,
+            "query_time": _now_iso(),
+        }
+    except ValueError as e:
+        return {
+            "error": str(e),
+            "query_time": _now_iso(),
+        }
+
+
+@mcp.tool()
+def chron_proxy_reality_state(organ: str = "", window: int = 5) -> dict:
+    """Get proxy-reality correlation state — the Proxy-Reality Paradox metric.
+
+    For each registered pair, computes whether proxy trends match reality
+    trends. Flags divergence: proxy improving while reality degrades = GAMING.
+
+    Divergence states:
+        HEALTHY     — proxy ↑, reality ↑ (or both stable)
+        GAMING      — proxy ↑, reality ↓ (specification gaming)
+        WRONG_PROXY — proxy ↓, reality ↑ (wrong metric)
+        FAILING     — proxy ↓, reality ↓ (systemic degradation)
+        UNKNOWN     — insufficient data
+
+    Args:
+        organ: filter by organ name (empty = all organs)
+        window: number of recent observations for trend computation (default 5)
+
+    Returns:
+        Per-pair correlation state + summary.
+    """
+    # Auto-seed defaults on first call
+    pr_seed_defaults()
+
+    result = pr_compute_all(organ=organ if organ else None, window=window)
+    return {
+        **result,
         "query_time": _now_iso(),
     }
 
