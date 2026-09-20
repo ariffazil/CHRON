@@ -30,6 +30,8 @@ from chron.chron_prediction import (
     compute_calibration,
     load_predictions,
     generate_from_chron_events,
+    _canonical_verdict,
+    _DECISIVE,
 )
 from chron.chron_verify import run_verification
 from chron.chron_learn import extract_lessons, load_lessons, get_candidates
@@ -139,11 +141,8 @@ def chron_store_stats() -> dict:
     lessons = load_lessons()
 
     active = [p for p in preds if p.get("status") == "ACTIVE"]
-    verified = [
-        p
-        for p in preds
-        if p.get("status") in ("VERIFIED_CORRECT", "VERIFIED_INCORRECT")
-    ]
+    verif_log = get_verified(limit=10000)
+    verified = [v for v in verif_log if _canonical_verdict(v) in _DECISIVE]
     due = get_due()
 
     return {

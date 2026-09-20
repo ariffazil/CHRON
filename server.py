@@ -32,6 +32,8 @@ from chron.chron_prediction import (
     compute_calibration,
     load_predictions,
     generate_from_chron_events,
+    _canonical_verdict,
+    _DECISIVE,
 )
 from chron.chron_verify import (
     run_verification,
@@ -795,7 +797,7 @@ async def health(request):
     decisive = [
         v
         for v in ledger
-        if v.get("verdict") in ("VERIFIED_CORRECT", "VERIFIED_INCORRECT")
+        if _canonical_verdict(v) in _DECISIVE
     ]
 
     ad_summary = get_ad_summary()

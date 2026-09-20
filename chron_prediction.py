@@ -117,6 +117,7 @@ def create_prediction(
     created_by: str = "system",
     trigger: str = "manual",
     loop_id: Optional[str] = None,
+    audience: str = "both",
     **extra,
 ) -> dict:
     """Create a new prediction object.
@@ -155,6 +156,7 @@ def create_prediction(
         "source": source,
         "source_id": source_id,
         "principal": principal,
+        "audience": audience,
         "model": model,
         "created_by": created_by,
         "trigger": trigger,
