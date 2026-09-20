@@ -86,6 +86,12 @@ def arrow_outcome_to_learning(dry_run: bool = False) -> dict:
     }
 
     if not dry_run:
+        try:
+            from chron.chron_early_falsifier_scan import main as _binding_scan
+            _binding_scan()
+            result["binding_scan"] = "/root/chron/data/binding_scan.json"
+        except Exception as exc:
+            WARNINGS.append({"step": "binding_scan", "error": str(exc)})
         _log_loop("OUTCOME→LEARNING", result)
 
     return result

@@ -162,7 +162,16 @@ def create_prediction(
         "trigger": trigger,
         "loop_id": loop_id,
         # ── Lifecycle (mutable until verified, then frozen) ──
-        "status": "ACTIVE",
+        # Bind-before-attention (2026-09-20): a claim with no machine probe
+        # and no explicit human-witness audience is UNBOUND, not ACTIVE.
+        # Cron cannot close a door that was never attached.
+        "status": (
+            "ACTIVE"
+            if (extra.get("probe_id") or audience == "arif")
+            else "UNBOUND"
+        ),
+        "binding": extra.get("probe_id")
+        or ("HUMAN_WITNESS" if audience == "arif" else "NO_MACHINE_PROBE"),
         "created_at": _now_iso(),
         # ── Verification payload (written by verify, never by create) ──
         "observed_outcome": None,
