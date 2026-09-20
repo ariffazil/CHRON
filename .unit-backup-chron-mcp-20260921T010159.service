@@ -1,0 +1,42 @@
+# CHRON FastMCP systemd service unit
+# DITEMPA BUKAN DIBERI — arifOS Federation
+#
+# Port: 18102 (CHRON temporal intelligence organ; 18096 held by apa-telegram-bridge)
+# Start: /root/chron/mcp_server.py
+# Health: curl http://127.0.0.1:18102/health
+#
+# Tools: chron_predictions_due, chron_calibration_state, chron_last_loop,
+#        chron_active_events, chron_active_predictions, chron_store_stats,
+#        chron_temporal_briefing, chron_generate_predictions
+
+[Unit]
+Description=CHRON Temporal Intelligence Organ — FastMCP Server
+After=network.target
+Wants=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/chron
+ExecStart=/opt/arifos/current/venv/bin/python3 mcp_server.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=chron-mcp
+
+EnvironmentFile=/root/.secrets/kunci-root.env
+Environment=CHRON_MCP_PORT=18102
+Environment=PYTHONPATH=/root
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=off
+ReadWritePaths=/root/chron
+
+[Install]
+WantedBy=multi-user.target
