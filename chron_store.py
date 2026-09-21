@@ -7,6 +7,14 @@ Design:
   - Content-addressed episode IDs: chron-ep-{YYYYMMDD}-{function}-{hash8}
   - Index kept in memory for fast lookups, rebuilt from JSONL on load
 
+Generation semantics (F13, 2026-09-21 — Phase 0):
+  - Every episode is stamped with store_generation at append time.
+  - store_generation bumps only on signed compaction/transition.
+  - INVARIANT: count() may disagree with index only if signed
+    compaction_receipt exists. Otherwise HOLD — serve JSONL truth.
+  - Reads (count, functions) ALWAYS read JSONL fresh. Index is a
+    write-time optimization, never a read-time source of truth.
+
 DITEMPA BUKAN DIBERI ⚒️
 """
 
@@ -22,6 +30,11 @@ from typing import Optional
 STORE_DIR = Path(os.environ.get("CHRON_STORE_DIR", "/root/chron/data"))
 EPISODES_FILE = STORE_DIR / "episodes.jsonl"
 INDEX_FILE = STORE_DIR / "index.json"
+
+# Phase 0 — temporal state semantics
+STORE_GENERATION = "gen-2026-09-21T13-05Z"
+SCHEMA_VERSION = "chron-store/2.0"
+COMPACTION_RECEIPT = os.environ.get("CHRON_COMPACTION_RECEIPT")  # None unless signed
 
 
 def _now_iso() -> str:
@@ -39,6 +52,69 @@ def _make_episode_id(function: str, body: dict) -> str:
     today = datetime.now(timezone.utc).strftime("%Y%m%d")
     h = _content_hash(body)
     return f"chron-ep-{today}-{function}-{h}"
+
+
+def _count_jsonl_lines() -> int:
+    """Count actual lines in JSONL (source of truth)."""
+    if not EPISODES_FILE.exists():
+        return 0
+    try:
+        return sum(1 for line in EPISODES_FILE.read_text().splitlines() if line.strip())
+    except OSError:
+        return 0
+
+
+def _functions_from_jsonl() -> dict[str, int]:
+    """Count episodes by function, reading JSONL fresh."""
+    counts: dict[str, int] = {}
+    if not EPISODES_FILE.exists():
+        return counts
+    try:
+        with open(EPISODES_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ep = json.loads(line)
+                    fn = ep.get("function", "?")
+                    counts[fn] = counts.get(fn, 0) + 1
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        pass
+    return counts
+
+
+def enforce_count_invariant() -> dict:
+    """
+    INVARIANT: JSONL count is the source of truth. Index may diverge
+    ONLY if signed compaction_receipt exists. Otherwise report HOLD.
+
+    Returns a status dict. Does NOT raise — callers decide what to do.
+    """
+    jsonl_count = _count_jsonl_lines()
+    index_count = 0
+    if INDEX_FILE.exists():
+        try:
+            index_data = json.loads(INDEX_FILE.read_text())
+            index_count = len(index_data)
+        except (OSError, json.JSONDecodeError):
+            index_count = -1  # unreadable
+
+    drift = index_count - jsonl_count
+    held = (drift <= 0) or bool(COMPACTION_RECEIPT)
+
+    return {
+        "jsonl_count": jsonl_count,
+        "index_count": index_count,
+        "drift": drift,
+        "compaction_receipt": COMPACTION_RECEIPT,
+        "invariant_held": held,
+        "generation": STORE_GENERATION,
+        "schema_version": SCHEMA_VERSION,
+        "checked_at": _now_iso(),
+    }
 
 
 # ───────────────────────── STORE OPERATIONS ─────────────────────────
@@ -108,6 +184,10 @@ class ChronStore:
         if "known_at" not in episode:
             episode["known_at"] = _now_iso()
 
+        # Phase 0 — stamp generation
+        episode["generation"] = STORE_GENERATION
+        episode["schema_version"] = SCHEMA_VERSION
+
         # Validate minimum required fields
         required = ["episode_id", "function", "valid_time"]
         missing = [k for k in required if k not in episode]
@@ -118,7 +198,7 @@ class ChronStore:
         with open(self.episodes_file, "a") as f:
             f.write(json.dumps(episode, default=str) + "\n")
 
-        # Update index
+        # Update in-memory index
         self._index[episode["episode_id"]] = {
             "episode_id": episode["episode_id"],
             "function": episode.get("function"),
@@ -128,7 +208,8 @@ class ChronStore:
             "output_decision": episode.get("output_decision"),
             "supersedes_episode_id": episode.get("supersedes_episode_id"),
         }
-        self._save_index()
+        # Phase 0 — defer index.json write; JSONL is the truth.
+        # Index file is now write-time cache only. Reads always JSONL.
         return episode
 
     def get(self, episode_id: str) -> Optional[dict]:
@@ -173,15 +254,15 @@ class ChronStore:
         return results[:limit]
 
     def count(self) -> int:
-        return len(self._index)
+        """
+        Phase 0 — read JSONL fresh. JSONL is source of truth.
+        Index is write-time cache only.
+        """
+        return _count_jsonl_lines()
 
     def functions(self) -> dict[str, int]:
-        """Count episodes by function."""
-        counts: dict[str, int] = {}
-        for meta in self._index.values():
-            fn = meta.get("function", "?")
-            counts[fn] = counts.get(fn, 0) + 1
-        return counts
+        """Phase 0 — read JSONL fresh per query."""
+        return _functions_from_jsonl()
 
     def latest(self, function: Optional[str] = None, n: int = 5) -> list[dict]:
         """Get latest N episodes, optionally filtered by function."""

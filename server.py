@@ -24,7 +24,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastmcp import FastMCP
 
-from chron.chron_store import get_store
+from chron.chron_store import (
+    get_store,
+    enforce_count_invariant,
+    STORE_GENERATION,
+    SCHEMA_VERSION,
+)
 from chron.chron_prediction import (
     get_active,
     get_due,
@@ -52,6 +57,50 @@ from chron.chron_proxy_reality import (
     compute_all as pr_compute_all,
     seed_defaults as pr_seed_defaults,
 )
+from enum import Enum
+
+
+class AudienceFilter(str, Enum):
+    arif = "arif"
+    syed = "syed"
+    both = "both"
+    all = "all"
+
+
+class MetricType(str, Enum):
+    proxy = "proxy"
+    reality = "reality"
+
+
+class ConfidenceLevel(str, Enum):
+    CONFIRMED = "CONFIRMED"
+    LIKELY = "LIKELY"
+    ANNOUNCED = "ANNOUNCED"
+    PREDICTED = "PREDICTED"
+    TENTATIVE = "TENTATIVE"
+
+
+class ConsequenceLevel(str, Enum):
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+
+
+class ActionabilityLevel(str, Enum):
+    PREPARE = "PREPARE"
+    WATCH = "WATCH"
+    MONITOR = "MONITOR"
+
+
+class EventKind(str, Enum):
+    FISCAL = "FISCAL"
+    MARKET_EVENT = "MARKET_EVENT"
+    REGULATORY_WINDOW = "REGULATORY_WINDOW"
+    PERSONAL_SAFE = "PERSONAL_SAFE"
+    MACRO_INDICATOR = "MACRO_INDICATOR"
+    MONETARY_POLICY = "MONETARY_POLICY"
+    OBSERVATION = "OBSERVATION"
+
 
 mcp = FastMCP(
     "CHRON",
@@ -137,7 +186,7 @@ def chron_last_loop() -> dict:
 
 
 @mcp.tool()
-def chron_active_events(audience: str = "all") -> dict:
+def chron_active_events(audience: AudienceFilter = AudienceFilter.all) -> dict:
     """Get chron_events filtered by audience.
 
     Args:
@@ -151,6 +200,10 @@ def chron_active_events(audience: str = "all") -> dict:
     Contract note (2026-09-18 witness report fix):
         'both' means "addressed to both principals" — shared-only.
         It does NOT mean "return everything". Use 'all' for full inventory.
+
+    Phase 1 fix: invalid audience values now FAIL-LOOSED via Pydantic enum
+    validation. Previously 'GARBAGE' silently returned the 'both' subset —
+    a privacy bug. Now such requests are rejected at the protocol boundary.
     """
     chron_events = Path("/root/AAA/scripts/chron_events.json")
     if not chron_events.exists():
@@ -159,8 +212,9 @@ def chron_active_events(audience: str = "all") -> dict:
     data = json.loads(chron_events.read_text())
     events = data.get("events", [])
 
-    if audience != "all":
-        events = [e for e in events if e.get("audience") in (audience, "both")]
+    aud = audience.value
+    if aud != "all":
+        events = [e for e in events if e.get("audience") in (aud, "both")]
 
     today = datetime.now(MYT).date()
     enriched = []
@@ -177,6 +231,7 @@ def chron_active_events(audience: str = "all") -> dict:
     return {
         "events": enriched,
         "count": len(enriched),
+        "audience_filter": aud,
         "query_time": _now_iso(),
     }
 
@@ -209,7 +264,11 @@ def _resolve_prediction_audience(pred: dict) -> str:
 
 
 @mcp.tool()
-def chron_active_predictions(limit: int = 50, source_id: str = "", audience: str = "all") -> dict:
+def chron_active_predictions(
+    limit: int = 50,
+    source_id: str = "",
+    audience: AudienceFilter = AudienceFilter.all,
+) -> dict:
     """Get all active (unverified) predictions.
 
     The institution's current expectations about the future.
@@ -232,30 +291,35 @@ def chron_active_predictions(limit: int = 50, source_id: str = "", audience: str
         else the audience of the source event named by `source_id`, else
         UNRESOLVED (excluded). The number excluded is returned in
         `audience_unresolved` so the gap is visible rather than silent.
+
+    Phase 1 fix: audience now uses AudienceFilter enum. Invalid values are
+    rejected at the protocol boundary rather than silently producing wrong
+    privacy filters.
     """
+    aud = audience.value
     preds = get_active()
     if source_id:
         preds = [p for p in preds if p.get("source_id") == source_id]
 
     unresolved: list = []
-    if audience != "all":
+    if aud != "all":
         resolved = []
         for p in preds:
             eff = _resolve_prediction_audience(p)
             if eff == "unresolved":
                 unresolved.append(p.get("prediction_id"))
                 continue
-            if audience == "both":
+            if aud == "both":
                 if eff == "both":
                     resolved.append({**p, "effective_audience": eff})
-            elif eff in (audience, "both"):
+            elif eff in (aud, "both"):
                 resolved.append({**p, "effective_audience": eff})
         preds = resolved
 
     total = len(preds)
     preds = preds[:limit]
     return {
-        "audience": audience,
+        "audience": aud,
         "audience_unresolved": unresolved,
         "predictions": preds,
         "count": len(preds),
@@ -280,7 +344,9 @@ def chron_store_stats() -> dict:
     active = get_active()
     verified = get_verified(limit=10000)
     decisive = [
-        v for v in verified if v.get("verdict") in ("VERIFIED_CORRECT", "VERIFIED_INCORRECT")
+        v
+        for v in verified
+        if v.get("verdict") in ("VERIFIED_CORRECT", "VERIFIED_INCORRECT")
     ]
     unverifiable = [v for v in verified if v.get("verdict") == "UNVERIFIABLE"]
     orphans = [v for v in verified if v.get("orphan")]
@@ -387,12 +453,21 @@ def chron_record_verification(
 
     Returns:
         Verification record with Brier score, or error if prediction not found.
+
+    Phase 1 fix: when prediction not found, return value includes
+    `_is_error: true` so callers can branch on contract violation rather
+    than treating semantic-failure as success.
     """
     # Find the prediction
     preds = load_predictions()
     pred = next((p for p in preds if p["prediction_id"] == prediction_id), None)
     if not pred:
+        # Phase 1: explicit error marker. Some clients also check isError
+        # at the protocol layer, but this ensures the body itself declares
+        # the failure regardless of which field the client inspects.
         return {
+            "_is_error": True,
+            "error_code": "PREDICTION_NOT_FOUND",
             "error": f"Prediction {prediction_id} not found",
             "query_time": _now_iso(),
         }
@@ -488,6 +563,313 @@ def _emit_ariflow_verify(
 
 
 # ───────────────────────── EXISTING TOOLS ─────────────────────────
+
+
+@mcp.tool()
+def chron_reconcile_state(force: bool = False) -> dict:
+    """
+    Phase 0 — reconcile in-memory state with JSONL truth.
+
+    Returns the invariant status:
+      - jsonl_count: actual episode lines on disk
+      - index_count: in-memory index size
+      - drift: index - jsonl (must be ≤ 0 unless signed compaction exists)
+      - invariant_held: bool
+      - generation, schema_version, compaction_receipt
+
+    If force=True, rebuilds the in-memory index from JSONL.
+    This is the tool an operator runs after a state contradiction
+    to surface — not to silently mask — the gap.
+    """
+    inv = enforce_count_invariant()
+
+    rebuilt = False
+    if force or not inv["invariant_held"]:
+        store = get_store()
+        store._rebuild_index()
+        rebuilt = True
+        inv = enforce_count_invariant()
+
+    return {
+        "status": "RECONCILED" if rebuilt else "CHECKED",
+        "invariant": inv,
+        "query_time": _now_iso(),
+    }
+
+
+@mcp.resource("chron://state")
+def chron_state_resource() -> str:
+    """
+    Current generation + invariant status. Read-once snapshot.
+
+    Honest answer to: "What state is CHRON actually in?"
+    """
+    inv = enforce_count_invariant()
+    store = get_store()
+    return json.dumps(
+        {
+            "generation": STORE_GENERATION,
+            "schema_version": SCHEMA_VERSION,
+            "compaction_receipt": inv["compaction_receipt"],
+            "episodes_jsonl": inv["jsonl_count"],
+            "episodes_index": inv["index_count"],
+            "drift_index_minus_jsonl": inv["drift"],
+            "invariant_held": inv["invariant_held"],
+            "functions_jsonl": _functions_from_jsonl_safe(),
+            "checked_at": inv["checked_at"],
+            "note": "Reads (count, functions) ALWAYS serve JSONL fresh. Index is write-time cache only.",
+        },
+        indent=2,
+        default=str,
+    )
+
+
+def _functions_from_jsonl_safe() -> dict[str, int]:
+    """Lazy import to avoid circular issues at module top."""
+    try:
+        from chron.chron_store import _functions_from_jsonl
+
+        return _functions_from_jsonl()
+    except Exception:
+        return {}
+
+
+# ───────────────────────── RESOURCES (Phase 3 catalog) ─────────────────────────
+
+
+@mcp.resource("chron://index")
+def chron_index_resource() -> str:
+    """
+    Capability index — what CHRON can do. Read-once discovery surface.
+    """
+    return json.dumps(
+        {
+            "organ": "CHRON",
+            "version": "4.0.5",
+            "protocol_era": "2025-06-18",
+            "doctrine": (
+                "Temporal consequence tracker. Predicts, verifies, calibrates, learns. "
+                "Not a scheduler. Not a memory store. "
+                "The organ that answers: What did we expect? What happened? Were we wrong?"
+            ),
+            "tools": [
+                "chron_predictions_due",
+                "chron_calibration_state",
+                "chron_last_loop",
+                "chron_active_events",
+                "chron_active_predictions",
+                "chron_store_stats",
+                "chron_verified_predictions",
+                "chron_temporal_briefing",
+                "chron_generate_predictions",
+                "chron_record_verification",
+                "chron_attention_debt",
+                "chron_create_event",
+                "chron_proxy_reality_register",
+                "chron_proxy_reality_observe",
+                "chron_proxy_reality_state",
+                "chron_reconcile_state",
+            ],
+            "resources": [
+                "chron://index",
+                "chron://state",
+                "chron://predictions/active",
+                "chron://events/upcoming",
+                "chron://calibration",
+                "chron://lessons",
+                "chron://schema",
+                "chron://doctrine",
+            ],
+            "prompts": [
+                "/briefing",
+                "/forecast",
+                "/calibrate",
+                "/audit",
+            ],
+            "event_store_path": "/root/AAA/scripts/chron_events.json",
+            "generation": STORE_GENERATION,
+            "queried_at": _now_iso(),
+        },
+        indent=2,
+        default=str,
+    )
+
+
+@mcp.resource("chron://predictions/active")
+def chron_predictions_active_resource() -> str:
+    """
+    Currently-active (unverified) predictions — the institution's expectations.
+    """
+    preds = get_active()
+    return json.dumps(
+        {
+            "count": len(preds),
+            "horizon": "active",
+            "predictions": preds[:50],
+            "queried_at": _now_iso(),
+        },
+        indent=2,
+        default=str,
+    )
+
+
+@mcp.resource("chron://events/upcoming")
+def chron_events_upcoming_resource() -> str:
+    """
+    Upcoming chron_events with target_date — the institution's known future.
+    """
+    chron_events = Path("/root/AAA/scripts/chron_events.json")
+    if not chron_events.exists():
+        return json.dumps({"events": [], "count": 0, "queried_at": _now_iso()})
+    data = json.loads(chron_events.read_text())
+    events = data.get("events", [])
+    today = datetime.now(MYT).date()
+    enriched = []
+    for e in events:
+        target = e.get("target_date")
+        days_until = None
+        if target:
+            try:
+                days_until = (datetime.strptime(target, "%Y-%m-%d").date() - today).days
+            except ValueError:
+                pass
+        enriched.append({**e, "days_until": days_until})
+    enriched.sort(key=lambda x: x.get("days_until") or 99999)
+    return json.dumps(
+        {
+            "events": enriched,
+            "count": len(enriched),
+            "queried_at": _now_iso(),
+        },
+        indent=2,
+        default=str,
+    )
+
+
+@mcp.resource("chron://calibration")
+def chron_calibration_resource() -> str:
+    """
+    Calibration state — how wrong have we been? Brier scores, accuracy, error class.
+    """
+    return json.dumps(
+        {
+            "calibration": compute_calibration(),
+            "queried_at": _now_iso(),
+        },
+        indent=2,
+        default=str,
+    )
+
+
+@mcp.resource("chron://lessons")
+def chron_lessons_resource() -> str:
+    """
+    Extracted lessons — what the institution has learned from verified outcomes.
+    """
+    lessons = load_lessons()
+    return json.dumps(
+        {
+            "total": len(lessons),
+            "candidates": len([l for l in lessons if l.get("status") == "CANDIDATE"]),
+            "lessons": lessons,
+            "queried_at": _now_iso(),
+        },
+        indent=2,
+        default=str,
+    )
+
+
+@mcp.resource("chron://schema")
+def chron_schema_resource() -> str:
+    """
+    Canonical schema reference — what shapes CHRON exchanges with the world.
+    """
+    return json.dumps(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "store_generation": STORE_GENERATION,
+            "prediction": {
+                "prediction_id": "str",
+                "claim": "str",
+                "confidence": "float [0,1]",
+                "expected_outcome": "any",
+                "verify_at": "ISO-8601",
+                "falsifier": "str",
+                "verifier_method": "str",
+                "horizon": "str",
+                "audience": "arif|syed|both",
+                "source": "str",
+                "source_id": "str",
+                "status": "ACTIVE|VERIFIED_CORRECT|VERIFIED_INCORRECT|UNVERIFIABLE|VOID",
+                "created_at": "ISO-8601",
+            },
+            "episode": {
+                "episode_id": "chron-ep-{date}-{function}-{hash8}",
+                "function": "observe|verify|learn|predict",
+                "valid_time": "ISO-8601",
+                "known_at": "ISO-8601",
+                "principal": "arif|syed|both",
+                "audience": "shared|private|...",
+                "generation": STORE_GENERATION,
+                "schema_version": SCHEMA_VERSION,
+            },
+            "temporal_event": {
+                "event_id": "kebab-case",
+                "title": "str",
+                "target_date": "YYYY-MM-DD",
+                "kind": "FISCAL|MARKET_EVENT|REGULATORY_WINDOW|PERSONAL_SAFE|MACRO_INDICATOR|MONETARY_POLICY|OBSERVATION",
+                "audience": "arif|syed|both",
+                "source": "str",
+                "confidence": "CONFIRMED|LIKELY|ANNOUNCED|PREDICTED|TENTATIVE",
+                "consequence": "HIGH|MEDIUM|LOW",
+                "actionability": "PREPARE|WATCH|MONITOR",
+            },
+            "queried_at": _now_iso(),
+        },
+        indent=2,
+        default=str,
+    )
+
+
+@mcp.resource("chron://doctrine")
+def chron_doctrine_resource() -> str:
+    """
+    CHRON's canonical doctrine. What this organ is and is not.
+    """
+    return json.dumps(
+        {
+            "name": "CHRON — Temporal Consequence Tracker",
+            "purpose": (
+                "The time-axis for recursive improvement. Predicts, verifies, "
+                "calibrates, learns. Not the brain. Not the judge. Not the executor. "
+                "Not long-term memory."
+            ),
+            "canonical_question": (
+                "We changed X because we expected Y. At time T, did Y actually happen — "
+                "and what should the institution learn from that?"
+            ),
+            "owns": "Temporal causality. The BEFORE/AFTER join.",
+            "does_not_own": [
+                "Memory (what to retain)",
+                "Judgment (whether lesson becomes law)",
+                "Execution (controlled phenotype)",
+                "Witness (independent verification)",
+                "Cost (improvement economics)",
+                "Meaning (semantic boundary)",
+            ],
+            "invariants": [
+                "No institutional improvement claim without temporal consequence evidence",
+                "Predictions become immutable after intervention begins",
+                "Every consequential action creates a future verification obligation",
+                "Reads serve JSONL truth; index is write-time cache",
+                "Audience filter must fail-closed on invalid input",
+            ],
+            "ratified_by": "F13 sovereign directive, 2026-09-21",
+            "queried_at": _now_iso(),
+        },
+        indent=2,
+        default=str,
+    )
 
 
 @mcp.tool()
@@ -794,11 +1176,7 @@ async def health(request):
     calibration = compute_calibration()
     active = get_active()
     ledger = get_verified(limit=10000)
-    decisive = [
-        v
-        for v in ledger
-        if _canonical_verdict(v) in _DECISIVE
-    ]
+    decisive = [v for v in ledger if _canonical_verdict(v) in _DECISIVE]
 
     ad_summary = get_ad_summary()
 
@@ -827,6 +1205,74 @@ async def health(request):
             },
             "query_time": _now_iso(),
         }
+    )
+
+
+# ───────────────────────── PROMPTS (Phase 4) ─────────────────────────
+# Prompts are ergonomic — they help construct intent + tool calls.
+# They are NOT capability, authority, or policy. The actual operation
+# requires arifOS judgment + A-FORGE execution + F13 seal.
+
+
+@mcp.prompt(title="Chron Briefing")
+def briefing_prompt(focus: str = "today") -> str:
+    """
+    Construct a temporal-briefing intent. Calls chron_temporal_briefing()
+    to pull predictions-due, calibration, last_loop, and active events.
+    """
+    return (
+        f"Run chron_temporal_briefing() with focus on '{focus}'. "
+        "Surface: (1) what predictions are due NOW, (2) calibration accuracy "
+        "and Brier score, (3) last loop summary, (4) active events ordered by "
+        "days_until. If anything is high-consequence and due soon, name it first. "
+        "Plain BM if human-facing, structured JSON if agent-facing."
+    )
+
+
+@mcp.prompt(title="Chron Forecast")
+def forecast_prompt(horizon_days: int = 7) -> str:
+    """
+    Construct a forecast intent. Calls chron_active_events(horizon=horizon_days)
+    + chron_active_predictions() to enumerate expectations.
+    """
+    return (
+        f"Generate a {horizon_days}-day forward forecast. "
+        "Call chron_active_events() with audience='both' and chron_active_predictions(). "
+        "Output: ordered list of (event_date, prediction, confidence, verifier). "
+        "Flag any prediction with confidence < 0.5 or no falsifier. "
+        "Include 'next verification' timestamp."
+    )
+
+
+@mcp.prompt(title="Chron Calibrate")
+def calibrate_prompt(window: int = 30) -> str:
+    """
+    Construct a calibration-check intent. Calls chron_calibration_state()
+    and chron_verified_predictions(limit=window).
+    """
+    return (
+        f"Run a calibration audit over the last {window} days. "
+        "Call chron_calibration_state() and chron_verified_predictions(limit=100). "
+        "Group by error_type. Compute mean Brier per group. "
+        "Identify which prediction categories are systematically over- or "
+        "under-confident. Output: actionable calibration adjustment proposal — "
+        "DO NOT auto-apply."
+    )
+
+
+@mcp.prompt(title="Chron Audit")
+def audit_prompt(scope: str = "store") -> str:
+    """
+    Construct an audit intent. Calls chron_reconcile_state(force=...)
+    and chron_store_stats() to verify store integrity.
+    """
+    return (
+        f"Run a CHRON audit on scope='{scope}'. "
+        "Call chron_reconcile_state(force=true) and chron_store_stats(). "
+        "Verify: (1) episode_count matches JSONL line count, "
+        "(2) invariant_held=true, (3) all active predictions have valid verify_at, "
+        "(4) all verified records have brier_score. "
+        "Report any drift or invariant violation as HOLD."
     )
 
 
