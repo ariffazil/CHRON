@@ -304,7 +304,10 @@ def run_verification(dry_run: bool = False) -> dict:
 
         # Decisive verdict — record it.
         correct = error == 0.0
-        verif_record = verify_prediction(pred, observed, correct)
+        # 2026-09-21: pass the class the evidence path MEASURED. Dropping it here
+        # was why every observed failure landed in the ledger as UNKNOWN and the
+        # skill estimate stayed unusable.
+        verif_record = verify_prediction(pred, observed, correct, error_class=error_class)
         _append_verification_record(verif_record)
 
         # Create verify episode (records the act, not the mutation)

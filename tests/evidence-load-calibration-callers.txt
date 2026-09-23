@@ -1,0 +1,26 @@
+=== (a) PROOF: load_calibration() now HAS a caller ===
+
+-- definition + call sites (excluding backups) --
+/root/chron/.pre-canonical-aaa-scripts-20260921T032142Z/chron_prediction.py:204:def load_calibration() -> Optional[dict]:
+/root/chron/chron_prediction.py:535:def load_calibration() -> Optional[dict]:
+/root/chron/chron_prediction.py:547:# 2026-09-21 (learning-loop closure). Before this section, ``load_calibration()``
+/root/chron/chron_prediction.py:828:    stored = load_calibration()
+
+-- the call chain, with line numbers --
+820:def calibration_snapshot() -> dict:
+828:    stored = load_calibration()
+895:    snapshot = calibration_snapshot()
+976:                outcome = recalibrate_confidence(proposed, snapshot)
+1026:        outcome = recalibrate_confidence(proposed, snapshot)
+
+-- consumers of the recalibration function --
+/root/chron/chron_prediction.py:390:        estimate usable; see ``recalibrate_confidence``.
+/root/chron/chron_prediction.py:515:        # ── Confidence axis (2026-09-21) — consumed by recalibrate_confidence() ──
+/root/chron/chron_prediction.py:711:def recalibrate_confidence(
+/root/chron/chron_prediction.py:721:    module state. The snapshot is passed in; see calibration_snapshot() for the
+/root/chron/chron_prediction.py:820:def calibration_snapshot() -> dict:
+/root/chron/chron_prediction.py:824:    snapshot, so recalibrate_confidence() can stay pure. The import of chron_learn
+/root/chron/chron_prediction.py:878:        proposed confidence  ──recalibrate_confidence()──▶  emitted confidence
+/root/chron/chron_prediction.py:895:    snapshot = calibration_snapshot()
+/root/chron/chron_prediction.py:976:                outcome = recalibrate_confidence(proposed, snapshot)
+/root/chron/chron_prediction.py:1026:        outcome = recalibrate_confidence(proposed, snapshot)

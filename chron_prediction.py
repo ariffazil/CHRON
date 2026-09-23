@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
@@ -359,7 +360,11 @@ def compute_brier(prediction: dict, outcome: bool) -> float:
 
 
 def verify_prediction(
-    prediction: dict, observed_outcome: str, correct: bool, unverifiable: bool = False
+    prediction: dict,
+    observed_outcome: str,
+    correct: bool,
+    unverifiable: bool = False,
+    error_class: Optional[str] = None,
 ) -> dict:
     """Verify a prediction and compute Brier score.
 
@@ -374,6 +379,16 @@ def verify_prediction(
         no Brier score. Silence must never be converted into a verdict —
         a missed check is not a missed prediction.
 
+    INVARIANT (2026-09-21 learning-loop closure):
+        ``error_class`` carries the class the EVIDENCE PATH actually observed
+        (see chron_verify._evidence_for: REGIME_CHANGE / NONE / ...). It used to
+        be discarded here: the verifier measured the class, wrote it to the
+        episode, and then let ``_classify_error`` re-derive UNKNOWN from the
+        prediction's empty ``assumptions`` list. That dropped argument is why the
+        calibration ledger reports error_type UNKNOWN for a failure whose cause
+        was measured. Classified outcomes are what make the store's skill
+        estimate usable; see ``recalibrate_confidence``.
+
     The caller is responsible for:
         1. Writing this verification record to verification_log.jsonl
         2. NOT rewriting the original prediction in predictions.jsonl
@@ -386,7 +401,13 @@ def verify_prediction(
     else:
         verdict = VERDICT_CORRECT if correct else VERDICT_INCORRECT
         error = 0.0 if correct else 1.0
-        error_type = "NONE" if correct else _classify_error(prediction)
+        if correct:
+            error_type = "NONE"
+        elif error_class and str(error_class).strip().upper() not in ("", "NONE", "UNKNOWN"):
+            # Honour the class the evidence path measured.
+            error_type = str(error_class).strip().upper()
+        else:
+            error_type = _classify_error(prediction)
         brier = compute_brier(prediction, correct)
 
     return {
@@ -436,41 +457,20 @@ def compute_calibration() -> dict:
     Evidence / pre-change snapshot:
       /root/chron/.backup-chron-repair-20260918T152417Z/calibration.json
     """
-    verified = get_verified(limit=10000)
-    scored = [
-        p for p in verified if p.get("verdict") in _DECISIVE and not p.get("orphan")
-    ]
-    orphans = [p for p in verified if p.get("orphan")]
-    unverifiable = [p for p in verified if p.get("verdict") == VERDICT_UNVERIFIABLE]
+    # ── 2026-09-21 LEDGER-INTEGRITY REPAIR ──────────────────────────────────
+    # This function used to count one ROW per verdict over ONE store's join.
+    # Two consequences, both measured:
+    #   * two predictions written against the same observed datum (XAUUSD
+    #     @ 4399.70, 2026-09-17) occupied TWO decisive slots, inflating n;
+    #   * because each surface joined a different store, this file and
+    #     .../chron_personal/calibration_report.json published different
+    #     mean_brier (0.24625 from the chron store's two rows vs 0.1825 from the
+    #     .hermes store's two gold rows) for the same statistic.
+    # The accounting rule now lives in exactly ONE place and every scheduled
+    # producer adapts to it, so there is one number on disk.
+    from chron.chron_ledger_integrity import compute_calibration_unified
 
-    correct = sum(1 for p in scored if p.get("verdict") == VERDICT_CORRECT)
-    incorrect = sum(1 for p in scored if p.get("verdict") == VERDICT_INCORRECT)
-
-    brier_scores: list[float] = []
-    for p in scored:
-        bs = p.get("brier_score")
-        if bs is not None:
-            brier_scores.append(float(bs))
-
-    by_error_type: dict[str, int] = {}
-    for p in scored:
-        et = p.get("error_type") or "UNKNOWN"
-        by_error_type[et] = by_error_type.get(et, 0) + 1
-
-    return {
-        # ── Backward-compatible keys (server.py health + MCP read these) ──
-        "total": len(scored),
-        "correct": correct,
-        "incorrect": incorrect,
-        "accuracy": (correct / len(scored)) if scored else None,
-        "mean_brier": (sum(brier_scores) / len(brier_scores)) if brier_scores else None,
-        "by_error_type": by_error_type,
-        # ── Disclosed detail: what was NOT scored, and why ──
-        "decisive": len(scored),
-        "unverifiable": len(unverifiable),
-        "orphan_records": len(orphans),
-        "records_in_log": len(verified),
-    }
+    return compute_calibration_unified()
 
 
 def save_calibration(calibration: dict) -> None:
@@ -490,6 +490,326 @@ def load_calibration() -> Optional[dict]:
         return None
 
 
+# ───────────────────────── RECALIBRATION (the broken learning hop) ─────────────────────────
+#
+# 2026-09-21 (learning-loop closure). Before this section, ``load_calibration()``
+# had ZERO callers outside its own definition: OUTCOME→LEARNING wrote
+# calibration.json and lessons.jsonl every cycle, and nothing read them. The loop
+# was Predict → Verify → Learn → WRITE FILE. A ledger, not a loop.
+#
+# The rule below is what makes a verified outcome change a future confidence.
+#
+# SHRINKAGE RULE — two-component linear shrinkage (empirical Bayes)
+# ----------------------------------------------------------------
+# Let, for a new prediction with generator-proposed confidence p ∈ [0,1]:
+#   n   = effective_n      decisive scored verdicts in the snapshot
+#   m   = classified_n     decisive verdicts whose outcome is INTERPRETABLE:
+#                          correct verdicts (error_type NONE) plus failures whose
+#                          error class was actually measured (not UNKNOWN)
+#   ā   = accuracy         = measured hit rate
+#   c̄   = mean_confidence  = what the store said at birth
+#   δ   = c̄ − ā            = reliability-in-the-large (δ>0 ⇒ overconfident)
+#
+#   w       = m / (m + κ)                     posterior weight on the evidence
+#   anchor  = ā            if skill usable     "shrink toward the measured base rate"
+#           = 0.5          otherwise           "shrink toward genuine uncertainty"
+#   δ_eff   = δ            if not usable and δ measurable, else 0
+#
+#   c_cal = clamp01( (1 − w)·p + w·anchor − w·δ_eff )
+#
+# Basis, component by component:
+#
+# 1. w = m/(m+κ) IS the Beta–Binomial posterior weight. Treating the hit rate as
+#    Beta(α,β) with prior mean μ₀ and strength κ = α+β, the posterior mean after m
+#    observations with k hits is (k + α)/(m + κ) = w·(k/m) + (1−w)·μ₀ — exactly a
+#    convex blend at weight w. κ is therefore not a fudge factor; it is "how many
+#    pseudo-observations of doubt". κ = 8 is deliberately conservative: at m = 2 it
+#    puts w = 0.20, so four-fifths of the answer stays with the proposal and no
+#    confident correction is possible from two outcomes. (Jeffreys α=β=0.5 → κ=1
+#    would put w = 0.67 at m=2 — far too permissive for a store this young;
+#    Haldane α=β=0 → κ=0 is degenerate, w ≡ 1.)
+#
+# 2. The anchor carries the variance-awareness. When the store cannot support a
+#    skill estimate the anchor is 0.5 — GENUINE UNCERTAINTY, not the measured
+#    frequency, because a 2-sample frequency is not an estimate of anything.
+#
+# 3. δ_eff applies ONLY in the not-usable branch. In the usable branch accuracy is
+#    trusted, so overconfidence is already priced in: a proposal above ā is pulled
+#    down BY THE PULL TOWARD ā. Adding δ there too would double-count the same
+#    bias — the error that would let a 60-sample overconfident store drive a 0.9 to
+#    0.02. In the not-usable branch ā itself is not trusted, so the measured
+#    DIRECTION of the bias is the only remaining usable signal and is applied at
+#    the same weight.
+#
+# 4. Bound: |c_cal − p| ≤ w·(|anchor − p| + |δ_eff|) ≤ 2w. The correction can never
+#    exceed twice the weight of evidence; at m = 2 that is 0.4, and it is measured
+#    at 0.081 on the live store. The bound is derived from m, never hardcoded.
+#
+# Known limitation, disclosed rather than hidden: with a corrected-but-not-
+# binned model, a proposal far from ā is pulled toward ā on evidence from ALL
+# claims, not from claims stated near p. A per-bin reliability curve (needs the
+# n the store does not yet have) would correct that. Until then w < 1 keeps the
+# pull bounded.
+
+# Prior strength in pseudo-observations (see basis note 1).
+CALIBRATION_KAPPA = 8.0
+# Decisive verdicts required before accuracy is treated as a skill estimate.
+MIN_EFFECTIVE_N = 8
+# Above this share of UNKNOWN error classes the taxonomy is blind: the store knows
+# it was wrong but not why, so it cannot attribute the failure to skill.
+MAX_UNKNOWN_SHARE = 0.5
+# Above this share of non-actionable lessons the lesson store is blind (it is
+# reporting its own inability to classify, not a learned rule).
+MAX_BLIND_LESSON_SHARE = 0.5
+
+QUALITY_NONE = "NONE"
+QUALITY_INSUFFICIENT = "INSUFFICIENT"
+QUALITY_SUFFICIENT = "SUFFICIENT"
+
+# Error classes from which a policy could legitimately be derived. UNKNOWN and NONE
+# are deliberately absent: neither names a cause.
+INTERPRETABLE_ERROR_TYPES = (
+    "ASSUMPTION_ERROR",
+    "DATA_ERROR",
+    "MODEL_ERROR",
+    "REGIME_CHANGE",
+    "AWAITING_EVIDENCE",
+)
+
+
+@dataclass(frozen=True)
+class CalibrationOutcome:
+    """Result of recalibrating one proposed confidence. Pure data, no I/O."""
+
+    proposed: float
+    calibrated: float
+    applied: bool
+    quality: str
+    effective_n: int
+    classified_n: int
+    unknown_share: Optional[float]
+    weight: float
+    anchor: float
+    bias: Optional[float]
+    delta_applied: float
+    shift: float
+    capped: bool
+    reason: str
+
+    def audit(self) -> dict:
+        """Compact, JSON-serialisable audit trail for a prediction record."""
+        return {
+            "proposed": self.proposed,
+            "calibrated": self.calibrated,
+            "applied": self.applied,
+            "quality": self.quality,
+            "effective_n": self.effective_n,
+            "classified_n": self.classified_n,
+            "unknown_share": self.unknown_share,
+            "weight": self.weight,
+            "anchor": self.anchor,
+            "bias": self.bias,
+            "delta_applied": self.delta_applied,
+            "shift": self.shift,
+            "capped": self.capped,
+            "reason": self.reason,
+        }
+
+
+def _clamp01(x: float) -> float:
+    return 0.0 if x < 0.0 else (1.0 if x > 1.0 else x)
+
+
+def classify_calibration_quality(snapshot: Optional[dict]) -> tuple[str, dict]:
+    """Grade a calibration snapshot. Pure.
+
+    Returns (quality, facts) where facts carries n / m / unknown_share /
+    blind_lesson_share so the caller can disclose WHY the grade was given.
+    """
+    snapshot = snapshot or {}
+    n = int(snapshot.get("effective_n") or snapshot.get("total") or 0)
+    accuracy = snapshot.get("accuracy")
+    mean_brier = snapshot.get("mean_brier")
+    by_error = snapshot.get("by_error_type") or {}
+    unknown = int(by_error.get("UNKNOWN") or 0)
+    m = max(0, n - unknown)
+    unknown_share = (unknown / n) if n else None
+    blind_share = snapshot.get("blind_lesson_share")
+    blind_share = float(blind_share) if blind_share is not None else None
+
+    facts = {
+        "effective_n": n,
+        "classified_n": m,
+        "unknown_share": unknown_share,
+        "blind_lesson_share": blind_share,
+    }
+
+    if n == 0 or accuracy is None or mean_brier is None:
+        return QUALITY_NONE, facts
+
+    usable = n >= MIN_EFFECTIVE_N
+    if unknown_share is not None and unknown_share > MAX_UNKNOWN_SHARE:
+        usable = False
+    if blind_share is not None and blind_share > MAX_BLIND_LESSON_SHARE:
+        usable = False
+
+    return (QUALITY_SUFFICIENT if usable else QUALITY_INSUFFICIENT), facts
+
+
+def recalibrate_confidence(
+    proposed: float,
+    snapshot: Optional[dict],
+    *,
+    kappa: float = CALIBRATION_KAPPA,
+    min_effective_n: int = MIN_EFFECTIVE_N,
+) -> CalibrationOutcome:
+    """Map a proposed confidence to one that reflects measured skill.
+
+    PURE: same (proposed, snapshot) → same result. No file I/O, no clock, no
+    module state. The snapshot is passed in; see calibration_snapshot() for the
+    one impure reader.
+
+    See the section comment above for the rule and its statistical basis.
+    """
+    p = _clamp01(float(proposed))
+    snapshot = snapshot or {}
+
+    quality, facts = classify_calibration_quality(snapshot)
+    if quality != QUALITY_NONE and facts["effective_n"] < min_effective_n:
+        # A caller may tighten min_effective_n; re-grade on the passed floor.
+        quality = QUALITY_INSUFFICIENT
+
+    n = facts["effective_n"]
+    m = facts["classified_n"]
+
+    def _outcome(calibrated, applied, anchor, bias, delta, shift, capped, reason):
+        return CalibrationOutcome(
+            proposed=p,
+            calibrated=round(float(calibrated), 10),
+            applied=applied,
+            quality=quality,
+            effective_n=n,
+            classified_n=m,
+            unknown_share=facts["unknown_share"],
+            weight=round(m / (m + kappa), 10) if (m + kappa) > 0 else 0.0,
+            anchor=anchor,
+            bias=bias,
+            delta_applied=delta,
+            shift=round(float(shift), 10),
+            capped=capped,
+            reason=reason,
+        )
+
+    if quality == QUALITY_NONE:
+        return _outcome(
+            p, False, 0.5, None, 0.0, 0.0, False,
+            "no decisive verdicts — calibration store empty; proposal passed through unaltered",
+        )
+
+    w = m / (m + kappa) if (m + kappa) > 0 else 0.0
+
+    if w == 0.0:
+        # Every decisive outcome is uninterpretable (unknown class) — the store
+        # cannot attribute a single failure to skill. Applying a correction here
+        # would be acting on evidence that does not exist.
+        return _outcome(
+            p, False, 0.5, snapshot.get("bias"), 0.0, 0.0, False,
+            "calibration quality INSUFFICIENT: no interpretable outcome — "
+            "correction withheld rather than applied on an unmeasurable base rate",
+        )
+
+    skill_usable = quality == QUALITY_SUFFICIENT
+    accuracy = snapshot.get("accuracy")
+    anchor = float(accuracy) if skill_usable else 0.5
+
+    bias = snapshot.get("bias")
+    if bias is None:
+        # DERIVE it rather than silently treating a measurable bias as zero. A
+        # silent fallback here would make an overconfident store look unbiased —
+        # the one error this function exists to prevent.
+        mc = snapshot.get("mean_confidence")
+        bias = (float(mc) - float(accuracy)) if (
+            mc is not None and accuracy is not None
+        ) else None
+    else:
+        bias = float(bias)
+    delta = bias if (not skill_usable and bias is not None) else 0.0
+
+    raw_shift = w * (anchor - p) - w * delta
+
+    # Correction may never exceed twice the weight of evidence (derived bound).
+    cap = 2.0 * w
+    capped = abs(raw_shift) > cap
+    shift = cap if raw_shift > cap else (-cap if raw_shift < -cap else raw_shift)
+
+    calibrated = _clamp01(p + shift)
+
+    if not skill_usable:
+        why = (
+            f"INSUFFICIENT (n={n} < {min_effective_n} and/or error taxonomy blind); "
+            f"anchored on genuine uncertainty 0.5, measured bias direction applied "
+            f"at evidence weight {w:.4f}"
+        )
+    else:
+        why = (
+            f"SUFFICIENT (n={n}); shrunk toward measured base rate {anchor:.4f} "
+            f"at evidence weight {w:.4f}"
+        )
+        if abs(shift) <= 1e-12:
+            why += "; shift is zero — the proposal already equals the measured base rate"
+    if capped:
+        why += f"; shift capped at {cap:.4f}"
+
+    return _outcome(
+        calibrated, abs(shift) > 1e-12, anchor, bias, delta, shift, capped, why
+    )
+
+
+def calibration_snapshot() -> dict:
+    """The ONLY impure reader on the recalibration path.
+
+    Merges the measured calibration store with the lesson store's health into one
+    snapshot, so recalibrate_confidence() can stay pure. The import of chron_learn
+    is lazy because chron_learn imports this module.
+    """
+    snap: dict = {}
+    stored = load_calibration()
+    if stored:
+        snap.update(stored)
+    snap["calibration_file"] = str(CALIBRATION_FILE)
+    snap.setdefault("effective_n", int(snap.get("total") or 0))
+
+    try:
+        from chron.chron_learn import lesson_health
+
+        snap.update(lesson_health())
+    except Exception as exc:  # noqa: BLE001 — a blind lesson store must not stop
+        # the loop, but it must also not be silently assumed healthy.
+        snap["lesson_health_error"] = f"{type(exc).__name__}: {exc}"
+    return snap
+
+
+def snapshot_digest(snapshot: Optional[dict]) -> dict:
+    """Small, auditable subset of a snapshot, stored on each prediction."""
+    snap = snapshot or {}
+    return {
+        "source": snap.get("calibration_file"),
+        "updated_at": snap.get("updated_at"),
+        "effective_n": snap.get("effective_n"),
+        "total": snap.get("total"),
+        "accuracy": snap.get("accuracy"),
+        "mean_brier": snap.get("mean_brier"),
+        "mean_confidence": snap.get("mean_confidence"),
+        "bias": snap.get("bias"),
+        "reliability": snap.get("reliability"),
+        "by_error_type": snap.get("by_error_type"),
+        "lesson_total": snap.get("lesson_total"),
+        "lesson_actionable": snap.get("lesson_actionable"),
+        "blind_lesson_share": snap.get("blind_lesson_share"),
+        "lesson_health_error": snap.get("lesson_health_error"),
+    }
+
+
 # ───────────────────────── GENERATE FROM EVENTS ─────────────────────────
 
 
@@ -499,6 +819,17 @@ def generate_from_chron_events() -> list[dict]:
     Reads the `predictions[]` array on each event. Each entry carries:
     claim, expected_value, threshold, verifier, falsifier, confidence.
     Falls back to trivial "event will occur" for events without predictions[].
+
+    2026-09-21 (learning-loop closure): the generator now CONSUMES the measured
+    calibration before it emits a confidence, and records what it consumed.
+
+        proposed confidence  ──recalibrate_confidence()──▶  emitted confidence
+
+    The snapshot (calibration.json + lesson-store health) is captured ONCE per
+    generation pass and stored on every prediction as `calibration_snapshot`, so a
+    later reader can tell which measurement produced that number. Before this, the
+    generator read neither file: OUTCOME→LEARNING wrote them and nothing read them
+    — a ledger, not a loop.
     """
     chron_events = Path("/root/AAA/scripts/chron_events.json")
     if not chron_events.exists():
@@ -507,6 +838,29 @@ def generate_from_chron_events() -> list[dict]:
     data = json.loads(chron_events.read_text())
     events = data.get("events", [])
     today = datetime.now(MYT).date()
+
+    # ── Consume the learning hop: one snapshot for the whole pass ──
+    snapshot = calibration_snapshot()
+    digest = snapshot_digest(snapshot)
+    lessons = _load_lessons_for_generation()
+    lesson_state = {
+        "lesson_total": len(lessons),
+        "lesson_actionable": sum(1 for l in lessons if l.get("actionable")),
+        "lesson_ids_actionable": [
+            l.get("lesson_id") for l in lessons if l.get("actionable")
+        ],
+        "lesson_ids_diagnostic": [
+            l.get("lesson_id") for l in lessons if not l.get("actionable")
+        ],
+        # An UNKNOWN-class lesson ("Investigate root cause") is the loop reporting
+        # its own blindness. It is carried for audit and explicitly NOT applied.
+        "policy_applied": False,
+        "policy_note": (
+            "no lesson is applied as policy: none yet meets the promotion gate "
+            "(external validation is not implemented), and blind (UNKNOWN-class) "
+            "lessons are diagnostics, not rules"
+        ),
+    }
 
     # Track existing source_ids to avoid duplicates (by event id + claim hash)
     existing_keys = set()
@@ -566,10 +920,13 @@ def generate_from_chron_events() -> list[dict]:
                 success_rule = sub_pred.get("verifier", "")
                 falsification_rule = sub_pred.get("falsifier", "")
 
+                proposed = float(sub_pred.get("confidence", 0.5))
+                outcome = recalibrate_confidence(proposed, snapshot)
+
                 pred = create_prediction(
                     claim=claim,
                     expected_outcome=sub_pred.get("expected_value", claim),
-                    confidence=sub_pred.get("confidence", 0.5),
+                    confidence=outcome.calibrated,
                     verify_at=verify_at,
                     assumptions=sub_pred.get("assumptions", []),
                     source="chron_events",
@@ -591,6 +948,13 @@ def generate_from_chron_events() -> list[dict]:
                     created_by="chron_prediction.generate_from_chron_events",
                     trigger="manual_generate",
                     loop_id=None,
+                    # ── Learning-hop audit trail (2026-09-21) ──
+                    confidence_proposed=proposed,
+                    confidence_calibrated=outcome.calibrated,
+                    calibration_quality=outcome.quality,
+                    recalibration=outcome.audit(),
+                    calibration_snapshot=digest,
+                    lessons_consumed=lesson_state,
                 )
                 predictions.append(pred)
             continue
@@ -606,17 +970,23 @@ def generate_from_chron_events() -> list[dict]:
             "ANNOUNCED": 0.8,
             "TENTATIVE": 0.6,
         }
-        confidence = confidence_map.get(event.get("confidence", ""), 0.5)
+        proposed = float(confidence_map.get(event.get("confidence", ""), 0.5))
+        outcome = recalibrate_confidence(proposed, snapshot)
 
         pred = create_prediction(
             claim=f"Event: {title}",
             expected_outcome=f"{title} will occur by {target_date_str}",
-            confidence=confidence,
+            confidence=outcome.calibrated,
             verify_at=verify_at,
             assumptions=[],
             source="chron_events",
             source_id=event_id,
             horizon=horizon,
+            # ── audience propagation (2026-09-23): the Path-B fallback must
+            # inherit the source event's audience — omitting it silently
+            # defaulted to "both", UNBOUND-ing arif-audience events and
+            # leaving their predictions invisible to get_active/get_due.
+            audience=event.get("audience", "both"),
             # ── P0 provenance fields ──
             evidence_snapshot=[
                 {
@@ -633,7 +1003,31 @@ def generate_from_chron_events() -> list[dict]:
             created_by="chron_prediction.generate_from_chron_events",
             trigger="manual_generate",
             loop_id=None,
+            # ── Learning-hop audit trail (2026-09-21) ──
+            confidence_proposed=proposed,
+            confidence_calibrated=outcome.calibrated,
+            calibration_quality=outcome.quality,
+            recalibration=outcome.audit(),
+            calibration_snapshot=digest,
+            lessons_consumed=lesson_state,
         )
         predictions.append(pred)
 
     return predictions
+
+
+def _load_lessons_for_generation() -> list[dict]:
+    """Read the lesson store for the generation pass, labelling each lesson.
+
+    Lazy import (chron_learn imports this module). Failure to read the lesson store
+    must not stop generation, but it is disclosed on the snapshot rather than
+    silently treated as "no lessons".
+    """
+    try:
+        from chron.chron_learn import load_lessons, is_actionable_lesson
+
+        return [
+            {**l, "actionable": is_actionable_lesson(l)} for l in load_lessons()
+        ]
+    except Exception:  # noqa: BLE001
+        return []

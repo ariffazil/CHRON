@@ -1,0 +1,76 @@
+CALIBRATION SNAPSHOT USED (live /root/chron/data/calibration.json + lessons.jsonl)
+{
+  "source": "/root/chron/data/calibration.json",
+  "updated_at": "2026-09-21T03:31:59.934940Z",
+  "effective_n": 3,
+  "total": 3,
+  "accuracy": 0.5,
+  "mean_brier": 0.22499999999999998,
+  "mean_confidence": null,
+  "bias": null,
+  "reliability": null,
+  "by_error_type": {
+    "NONE": 1,
+    "UNKNOWN": 1
+  },
+  "lesson_total": 2,
+  "lesson_actionable": 0,
+  "blind_lesson_share": 1.0,
+  "lesson_health_error": null
+}
+
+BEFORE / AFTER — the same 12 predicted events, proposed vs RECALIBRATED confidence
+event                      claim                                                    proposed calibrated     shift       w  anchor quality       verdict
+------------------------------------------------------------------------------------------------------------------------------------------------------------------
+budget-2027                PETRONAS dividen to federal government will be ≥ RM30b f     0.60     0.5800   -0.0200  0.2000    0.50 INSUFFICIENT  DOWN
+budget-2027                RON95 subsidy rationalisation will be announced or reaff     0.70     0.6600   -0.0400  0.2000    0.50 INSUFFICIENT  DOWN
+fuel-price-window          RON95 price for 24-30 Sept window will remain at or belo     0.85     0.7800   -0.0700  0.2000    0.50 INSUFFICIENT  DOWN
+fuel-price-window          Brent crude will be in range USD65-75/bbl on 23 Sept (we     0.65     0.6200   -0.0300  0.2000    0.50 INSUFFICIENT  DOWN
+od1                        MSS package terms will be formally received by OD1           0.70     0.6600   -0.0400  0.2000    0.50 INSUFFICIENT  DOWN
+od1                        arifOS revenue (pilot or contract) will be > RM0 by OD1      0.40     0.4200   +0.0200  0.2000    0.50 INSUFFICIENT  up
+electricity-800            January 2027 electricity bill for a household using 700      0.80     0.7400   -0.0600  0.2000    0.50 INSUFFICIENT  DOWN
+einv-svdp                  LHDN will NOT extend the SVDP window beyond 2027-12-31       0.60     0.5800   -0.0200  0.2000    0.50 INSUFFICIENT  DOWN
+einv-svdp                  e-Invoice compliance rate among SMEs will be ≥60% by SVD     0.50     0.5000   +0.0000  0.2000    0.50 INSUFFICIENT  no-op
+my-001-bnm-opr-nov2026     BNM will keep the Overnight Policy Rate at 2.75% on 5 No     0.80     0.7400   -0.0600  0.2000    0.50 INSUFFICIENT  DOWN
+my-002-cpi-sept2026        Malaysia September 2026 headline CPI inflation will be b     0.75     0.7000   -0.0500  0.2000    0.50 INSUFFICIENT  DOWN
+my-003-gdp-q3-2026         Malaysia Q3 2026 advance GDP growth will be at least 5.0     0.70     0.6600   -0.0400  0.2000    0.50 INSUFFICIENT  DOWN
+------------------------------------------------------------------------------------------------------------------------------------------------------------------
+12 predictions | proposed 0.40-0.85 | calibrated 0.4200-0.7800 | all shifts negative: False
+
+NOTE: these 12 records already exist in the live store holding their ORIGINAL
+(uncalibrated) birth confidence. Predictions are immutable at birth, so this
+table is what the generator emits when a claim is next generated — not a
+rewrite of history. See the report's WHAT I COULD NOT DO.
+
+====================================================================================================
+SNAPSHOT SENSITIVITY — proof the correction is not a hardcoded multiplier.
+====================================================================================================
+
+(A) SUFFICIENT store (n=60, no blind class): the measured base rate drives it.
+snapshot (n=60, mean_confidence 0.90)    proposed calibrated     shift  quality
+--------------------------------------------------------------------------------------
+  accuracy 0.20                              0.90     0.2824   -0.6176  SUFFICIENT
+  accuracy 0.40                              0.90     0.4588   -0.4412  SUFFICIENT
+  accuracy 0.50                              0.90     0.5471   -0.3529  SUFFICIENT
+  accuracy 0.70                              0.90     0.7235   -0.1765  SUFFICIENT
+  accuracy 0.90                              0.90     0.9000   +0.0000  SUFFICIENT
+  -> 5 DISTINCT calibrated values for one proposal: [0.2823529412, 0.4588235294, 0.5470588235, 0.7235294118, 0.9]
+
+(B) INSUFFICIENT store (live shape: n=4, half the failures UNKNOWN). The base
+    rate is deliberately NOT trusted below the floor, so accuracy alone does
+    not move the result. The snapshot enters through bias, classified_n and
+    lesson health — each row below changes exactly one of those.
+snapshot                                     proposed calibrated     shift  quality
+--------------------------------------------------------------------------------------
+acc 0.30 / bias +0.10 (overconfident)            0.90     0.8000   -0.1000  INSUFFICIENT
+acc 0.70 / bias +0.10 (overconfident)            0.90     0.8000   -0.1000  INSUFFICIENT
+acc 0.50 / bias +0.2375  [LIVE store]            0.90     0.7725   -0.1275  INSUFFICIENT
+acc 0.50 / bias -0.3000 (underconfident)         0.90     0.8800   -0.0200  INSUFFICIENT
+acc 0.50 / bias +0.2375, failures classified     0.90     0.6875   -0.2125  INSUFFICIENT
+acc 0.50 / bias +0.2375, lesson store healthy     0.90     0.6875   -0.2125  INSUFFICIENT
+
+(C) The LESSON STORE can veto an otherwise-usable calibration (snapshot changes)
+snapshot                                             proposed calibrated     shift  quality
+----------------------------------------------------------------------------------------------
+hygienic lesson store (blind share 0.0)                  0.90     0.4588   -0.4412  SUFFICIENT
+lesson store reports its own blindness (1.0)             0.90     0.1059   -0.7941  INSUFFICIENT

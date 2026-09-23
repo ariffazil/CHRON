@@ -1,0 +1,81 @@
+1. Overconfident store → confidence moves DOWN
+  [PASS] quality is SUFFICIENT: got='SUFFICIENT' want='SUFFICIENT'
+  [PASS] calibrated < proposed — 0.4588235294 < 0.9
+  [PASS] correction applied — SUFFICIENT (n=60); shrunk toward measured base rate 0.4000 at evidence weight 0.8824
+  [PASS] matches documented rule — 0.4588235294 == 0.45882352941176474
+  [PASS] anchor is the measured base rate: got=0.4 want=0.4
+
+2. Underconfident store → confidence moves UP
+  [PASS] quality is SUFFICIENT: got='SUFFICIENT' want='SUFFICIENT'
+  [PASS] calibrated > proposed — 0.7647058824 > 0.5
+  [PASS] matches documented rule — 0.7647058824 == 0.7647058823529412
+
+3. Small effective n → bounded correction, INSUFFICIENT
+  [PASS] quality is INSUFFICIENT below the floor: got='INSUFFICIENT' want='INSUFFICIENT'
+  [PASS] effective_n reported: got=2 want=2
+  [PASS] classified_n excludes the uninterpretable outcome: got=1 want=1
+  [PASS] weight is the Beta-Binomial posterior weight — 0.1111111111 == 0.1111111111111111
+  [PASS] shift within the derived variance bound — |-0.0805555556| <= 0.08055555555555556
+  [PASS] correction is near a no-op (< 0.10) — shift=-0.0805555556
+  [PASS] |shift| grows with effective n — n=2 shift -0.18 < n=60 shift -0.4411764706
+  [PASS] weight strictly increases with n — [0.2, 0.3846153846, 0.7142857143, 0.9259259259]
+
+4. UNKNOWN-only error classes → no aggressive correction
+  [PASS] quality INSUFFICIENT when taxonomy is blind: got='INSUFFICIENT' want='INSUFFICIENT'
+  [PASS] classified_n is 0: got=0 want=0
+  [PASS] weight is 0 — no evidence to act on: got=0.0 want=0.0
+  [PASS] calibrated == proposed (no correction): got=0.9 want=0.9
+  [PASS] applied is False: got=False want=False
+  [PASS] a classified store DOES correct — shift=-0.4310344828
+  [PASS] blind store is strictly less aggressive than classified store — |0.0| < 1/10 |-0.4310344828|
+  [PASS] blind lesson store vetoes SUFFICIENT: got='INSUFFICIENT' want='INSUFFICIENT'
+  [PASS] veto changes the outcome — 0.1058823529 vs 0.4588235294
+
+5. Generator consumes calibration + lessons
+  [PASS] generator produced predictions — 12 recorded
+  [PASS] one record per generated prediction: got=12 want=12
+  [PASS] emitted confidences are NOT the raw proposals — 12 proposals vs 12 emitted
+  [PASS] every prediction carries the audit trail: got=[] want=[]
+  [PASS] quality propagated from the store: got=[] want=[]
+  [PASS] emitted confidence == calibrated: got=[] want=[]
+  [PASS] a correction is due for at least one prediction — 11 of 12
+  [PASS] emitted confidence != raw proposal wherever a correction is due: got=[] want=[]
+  [PASS] every due confidence moved DOWN: got=11 want=11
+  [PASS] proposal == measured base rate ⇒ no shift: got=[] want=[]
+  [PASS] snapshot digest records effective_n: got=60 want=60
+  [PASS] snapshot digest records accuracy: got=0.4 want=0.4
+  [PASS] snapshot digest names its source file: got='/tmp/chron-calib-test-xx74jy22/calibration.json' want='/tmp/chron-calib-test-xx74jy22/calibration.json'
+  [PASS] lessons are consumed and audited: got=1 want=1
+  [PASS] the actionable lesson is labelled actionable: got=1 want=1
+  [PASS] no lesson is silently applied as policy: got=False want=False
+  [PASS] empty store ⇒ confidence passed through unaltered: got=[] want=[]
+  [PASS] empty store ⇒ quality NONE: got=['NONE'] want=['NONE']
+
+6. Calibrated value tracks the snapshot
+  [PASS] five accuracies ⇒ five distinct calibrations — [0.2823529412, 0.4588235294, 0.5470588235, 0.7235294118, 0.9]
+  [PASS] calibration is monotone increasing in measured accuracy — [0.2823529412, 0.4588235294, 0.5470588235, 0.7235294118, 0.9]
+  [PASS] accuracy 0.90 does not move a 0.9 proposal down — 0.9
+  [PASS] underconfident store moves 0.5 up — 0.7647058824
+  [PASS] empty store leaves 0.5 alone — 0.5
+  [PASS] overconfident small-n store moves 0.5 down — -0.0361111111
+  [PASS] underconfident small-n store moves 0.5 up — 0.0333333333
+  [PASS] bias derived when the field is absent (same calibrated value) — calibrated 0.8194444444 vs 0.8194444444; delta 0.32499999999999996
+
+7. recalibrate_confidence() is pure
+  [PASS] deterministic: got=CalibrationOutcome(proposed=0.9, calibrated=0.4588235294, applied=True, quality='SUFFICIENT', effective_n=60, classified_n=60, unknown_share=0.0, weight=0.8823529412, anchor=0.4, bias=0.5, delta_applied=0.0, shift=-0.4411764706, capped=False, reason='SUFFICIENT (n=60); shrunk toward measured base rate 0.4000 at evidence weight 0.8824') want=CalibrationOutcome(proposed=0.9, calibrated=0.4588235294, applied=True, quality='SUFFICIENT', effective_n=60, classified_n=60, unknown_share=0.0, weight=0.8823529412, anchor=0.4, bias=0.5, delta_applied=0.0, shift=-0.4411764706, capped=False, reason='SUFFICIENT (n=60); shrunk toward measured base rate 0.4000 at evidence weight 0.8824')
+  [PASS] does not read CALIBRATION_FILE: got=CalibrationOutcome(proposed=0.9, calibrated=0.4588235294, applied=True, quality='SUFFICIENT', effective_n=60, classified_n=60, unknown_share=0.0, weight=0.8823529412, anchor=0.4, bias=0.5, delta_applied=0.0, shift=-0.4411764706, capped=False, reason='SUFFICIENT (n=60); shrunk toward measured base rate 0.4000 at evidence weight 0.8824') want=CalibrationOutcome(proposed=0.9, calibrated=0.4588235294, applied=True, quality='SUFFICIENT', effective_n=60, classified_n=60, unknown_share=0.0, weight=0.8823529412, anchor=0.4, bias=0.5, delta_applied=0.0, shift=-0.4411764706, capped=False, reason='SUFFICIENT (n=60); shrunk toward measured base rate 0.4000 at evidence weight 0.8824')
+  [PASS] no CHRON store changed: got={'calibration.json': (7348, 1789961591010257586), 'lessons.jsonl': (755, 1789961277544341805), 'predictions.jsonl': (53748, 1789961519932175467), 'verification_log.jsonl': (8402, 1789961227648784922), 'verification_attempts.jsonl': (395, 1789902661171299789), 'loop_log.jsonl': (31770, 1789961575778388409)} want={'calibration.json': (7348, 1789961591010257586), 'lessons.jsonl': (755, 1789961277544341805), 'predictions.jsonl': (53748, 1789961519932175467), 'verification_log.jsonl': (8402, 1789961227648784922), 'verification_attempts.jsonl': (395, 1789902661171299789), 'loop_log.jsonl': (31770, 1789961575778388409)}
+  [PASS] snapshot not mutated: got={'effective_n': 60, 'total': 60, 'accuracy': 0.4, 'mean_brier': 0.33, 'mean_confidence': 0.9, 'bias': 0.5, 'reliability': -0.32, 'by_error_type': {'NONE': 24, 'MODEL_ERROR': 36}, 'blind_lesson_share': 0.0} want={'effective_n': 60, 'total': 60, 'accuracy': 0.4, 'mean_brier': 0.33, 'mean_confidence': 0.9, 'bias': 0.5, 'reliability': -0.32, 'by_error_type': {'NONE': 24, 'MODEL_ERROR': 36}, 'blind_lesson_share': 0.0}
+  [PASS] p<0 clamped
+  [PASS] p>1 clamped
+
+8. Blind lesson is not a learned policy
+  [PASS] UNKNOWN lesson is not actionable: got=False want=False
+  [PASS] a named-cause lesson IS actionable: got=True want=True
+  [PASS] no-cause lesson without a measurement is not actionable: got=False want=False
+  [PASS] every lesson in the live store is blind: got=0 want=0
+  [PASS] live store is non-empty (the check is not vacuous) — 2 lessons
+  [PASS] live promotion candidates exclude them: got=[] want=[]
+  [PASS] blind_lesson_share is 1.0 on the live store: got=1.0 want=1.0
+
+RESULT: PASS — verified outcomes now change future confidence

@@ -23,7 +23,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from chron.chron_verify import run_verification
-from chron.chron_learn import extract_lessons, load_lessons, get_candidates
+from chron.chron_learn import (
+    extract_lessons,
+    load_lessons,
+    get_candidates,
+    load_insufficient,
+    lesson_health,
+)
 from chron.chron_prediction import get_verified, compute_calibration, save_calibration
 from chron.chron_store import get_store
 from chron.chron_ariflow_bridge import run_bridge, poll_fq_daemon
@@ -56,9 +62,15 @@ def arrow_outcome_to_learning(dry_run: bool = False) -> dict:
     verify_result = run_verification(dry_run=dry_run)
 
     # 2. Extract lessons from verified predictions
-    #    (dry_run: extract_lessons APPENDS to lessons.jsonl and the episode
-    #     store — so it must not run in a dry pass. 2026-09-18)
+    #    (dry_run: extract_lessons APPENDS to lessons.jsonl, the insufficiency
+    #     ledger and the episode store — so it must not run in a dry pass. 2026-09-18)
     lessons = [] if dry_run else extract_lessons()
+
+    # 2b. Outcomes the classifier could not explain. Counted and reported rather
+    #     than absorbed: "we measured it and cannot explain it" is a different
+    #     state from "we learned nothing", and a loop that reports only lessons
+    #     makes unexplained outcomes invisible. (2026-09-21)
+    unclassified = [] if dry_run else load_insufficient()
 
     # 3. Compute calibration
     calibration = compute_calibration()
@@ -75,6 +87,15 @@ def arrow_outcome_to_learning(dry_run: bool = False) -> dict:
             "unverifiable": verify_result.get("unverifiable", 0),
         },
         "lessons_extracted": len(lessons),
+        "outcomes_unclassified": len(unclassified),
+        "unclassified_state": [
+            {
+                "error_type_seen": r.get("error_type_seen"),
+                "recurrence": r.get("recurrence"),
+                "reason": r.get("reason"),
+            }
+            for r in unclassified
+        ],
         "calibration": {
             "total_verified": calibration.get("total", 0),
             "accuracy": calibration.get("accuracy"),
@@ -161,19 +182,61 @@ def arrow_experience_to_memory(dry_run: bool = False) -> dict:
 
 
 # ───────────────────────── ARROW 3: MEMORY → POLICY ─────────────────────────
+#
+# ── PROMOTION CRITERIA (2026-09-21) ──────────────────────────────────────────
+#
+# TWO criteria are required. Both are measurable and both can return False:
+#
+#   1. RECURRENCE >= 2
+#        Two or more decisive INCORRECT outcomes in the same error class.
+#
+#   2. MEASURED EFFECT
+#        The error class's share of decisive outcomes FELL after the lesson was
+#        created, measured over >= 2 decisive outcomes recorded after it.
+#
+# CRITERION 3 — external_validation — WAS DROPPED ON 2026-09-21. IT WAS NOT
+# IMPLEMENTED. The code it replaced was:
+#     has_external_validation = False  # Not yet implemented
+# and that constant fed the eligibility flag, so every HOLD this arrow emitted
+# named a missing criterion that no evidence could ever supply. A criterion that
+# cannot be satisfied makes a gate that always says HOLD, which is
+# indistinguishable from no gate: it launders "this was never built" into "the
+# lesson did not qualify". The live store made the failure visible — the only
+# promotion assessment ever produced read
+# `Missing: recurrence, measurement, external_validation`, i.e. two honest
+# deficits plus one permanent fiction.
+#
+# Why it was dropped rather than implemented: an external validator for a LESSON
+# needs a witness that can FALSIFY it — an observer outside CHRON that
+# independently measures whether the diagnosed error class recurs. No organ
+# holds that measurement. FRAME measures drift between federation source and
+# runtime; arifFlow records that events happened. Wiring either one to this flag
+# would emit a green light about nothing, which is worse than the placeholder,
+# because a fake witness is indistinguishable from a real check in the receipt.
+# Reinstate criterion 3 only together with a witness whose output can be False
+# for a bad lesson; the gate is honest at two criteria until then.
+#
+# VALIDITY PRECONDITION (not a criterion, and not counted as one): the lesson's
+# error class must be interpretable (chron_prediction.INTERPRETABLE_ERROR_TYPES).
+# A lesson built on "UNKNOWN" names no cause, so there is nothing to promote —
+# it is excluded before the criteria are evaluated.
+
+CRITERION_RECURRENCE_MIN = 2
+CRITERION_MIN_AFTER_OUTCOMES = 2
+CRITERION_3_DROPPED = "external_validation"
+DECISIVE_VERDICTS = ("VERIFIED_CORRECT", "VERIFIED_INCORRECT")
 
 
 def arrow_memory_to_policy(dry_run: bool = False) -> dict:
     """Wire: lessons → policy candidate → promotion gate.
 
-    This closes the MEMORY → POLICY arrow.
-    Lessons that meet promotion criteria become policy candidates.
-    Policy candidates require external validation before deployment.
+    This closes the MEMORY → POLICY arrow. Lessons that meet BOTH criteria
+    (recurrence, measured effect) are appended to policy_candidates.jsonl.
 
-    Promotion criteria:
-      - Recurrence: same error_class seen 2+ times
-      - Measured effect: lesson applied → error reduced
-      - External validation: FRAME or arifOS confirms
+    What this arrow does NOT do: it does not deploy a policy. A promoted lesson
+    is a POLICY_CANDIDATE — a proposal carrying its own evidence. Changing
+    prediction behaviour is a separate, authorised act; this loop elevates
+    evidence, it does not grant itself authority over doctrine.
     """
     candidates = get_candidates()
     all_lessons = load_lessons()
@@ -189,6 +252,10 @@ def arrow_memory_to_policy(dry_run: bool = False) -> dict:
         else:
             held.append(promotion_result)
 
+    written = 0
+    if not dry_run:
+        written = _write_policy_candidates(promoted)
+
     result = {
         "arrow": "MEMORY → POLICY",
         "timestamp": _now_iso(),
@@ -196,8 +263,11 @@ def arrow_memory_to_policy(dry_run: bool = False) -> dict:
         "candidates": len(candidates),
         "promoted": len(promoted),
         "held": len(held),
+        "policy_candidates_written": written,
         "promotions": promoted,
         "holds": held,
+        "criteria": ["recurrence", "measured_effect"],
+        "criterion_dropped": CRITERION_3_DROPPED,
         "status": "COMPLETE" if promoted else "NO_PROMOTIONS",
         "dry_run": dry_run,
     }
@@ -207,44 +277,170 @@ def arrow_memory_to_policy(dry_run: bool = False) -> dict:
     return result
 
 
+def _measured_effect(lesson: dict) -> dict:
+    """Did the diagnosed error class become rarer AFTER this lesson existed?
+
+    The claim under test is the lesson's own: "this error class is a recurring
+    failure mode". If that is true, the class keeps appearing; if the lesson
+    addresses the cause, its share of outcomes falls. So the measurement is a
+    before/after share of decisive outcomes, not the lesson's own mean Brier —
+    mean Brier belongs to the predictions that produced the lesson and cannot
+    measure anything that happened afterwards.
+
+    Tri-state by construction, because "not measured yet" is a real answer and
+    conflating it with False is what made the old gate unreadable:
+        NOT_YET_MEASURABLE — fewer than CRITERION_MIN_AFTER_OUTCOMES decisive
+                             outcomes exist after the lesson was created.
+        IMPROVED           — the class share fell over that window.
+        NOT_IMPROVED       — the class share did not fall.
+    """
+    from chron.chron_prediction import get_verified as _get_verified
+
+    created = lesson.get("created_at") or ""
+    error_type = str(lesson.get("error_type") or "").strip().upper()
+
+    ledger = [
+        v
+        for v in _get_verified(limit=10000)
+        if v.get("verdict") in DECISIVE_VERDICTS and v.get("verified_at")
+    ]
+    before = [v for v in ledger if v.get("verified_at", "") < created]
+    after = [v for v in ledger if v.get("verified_at", "") >= created]
+
+    def _in_class(rows: list[dict]) -> int:
+        return sum(
+            1 for v in rows if str(v.get("error_type") or "").strip().upper() == error_type
+        )
+
+    evidence = {
+        "decisive_before": len(before),
+        "in_class_before": _in_class(before),
+        "decisive_after": len(after),
+        "in_class_after": _in_class(after),
+        "min_after_outcomes": CRITERION_MIN_AFTER_OUTCOMES,
+        "lesson_created_at": created,
+    }
+
+    if len(after) < CRITERION_MIN_AFTER_OUTCOMES:
+        return {"state": "NOT_YET_MEASURABLE", "met": False, "evidence": evidence}
+
+    share_before = _in_class(before) / len(before) if before else None
+    share_after = _in_class(after) / len(after)
+    evidence["share_before"] = share_before
+    evidence["share_after"] = share_after
+
+    met = share_before is not None and share_after < share_before
+    return {
+        "state": "IMPROVED" if met else "NOT_IMPROVED",
+        "met": met,
+        "evidence": evidence,
+    }
+
+
 def _evaluate_promotion(lesson: dict) -> dict:
     """Evaluate whether a lesson qualifies for policy promotion.
 
-    Returns promotion assessment.
+    Criteria: recurrence (>= 2) and measured_effect. Criterion 3
+    (external_validation) was DROPPED — see the section comment above the arrow;
+    it is reported as a string, never as a False that reads like a real check.
     """
+    from chron.chron_prediction import INTERPRETABLE_ERROR_TYPES
+
     lesson_id = lesson.get("lesson_id", "?")
     recurrence = lesson.get("recurrence", 0)
-    error_type = lesson.get("error_type", "UNKNOWN")
+    error_type = str(lesson.get("error_type") or "").strip().upper()
     mean_brier = lesson.get("mean_brier")
 
-    # Criterion 1: Recurrence (need 2+)
-    has_recurrence = recurrence >= 2
+    # Validity precondition — not a criterion (see section comment).
+    classifiable = error_type in INTERPRETABLE_ERROR_TYPES
 
-    # Criterion 2: Measured effect (Brier improving)
-    has_measurement = mean_brier is not None and mean_brier < 0.25  # Better than random
+    recurrence_met = recurrence >= CRITERION_RECURRENCE_MIN
+    effect = _measured_effect(lesson) if classifiable else {
+        "state": "NOT_EVALUATED_UNCLASSIFIABLE",
+        "met": False,
+        "evidence": {"reason": f"error class {error_type!r} names no cause"},
+    }
 
-    # Criterion 3: External validation (placeholder — needs FRAME/arifOS)
-    has_external_validation = False  # Not yet implemented
+    criteria = {
+        "recurrence": {
+            "value": recurrence,
+            "threshold": CRITERION_RECURRENCE_MIN,
+            "met": recurrence_met,
+        },
+        "measured_effect": effect,
+    }
 
-    eligible = has_recurrence and has_measurement
+    eligible = classifiable and recurrence_met and bool(effect.get("met"))
+
+    if eligible:
+        reason = "Meets all criteria"
+    else:
+        missing = []
+        if not classifiable:
+            missing.append(f"precondition:classifiable (error class {error_type!r} names no cause)")
+        if not recurrence_met:
+            missing.append(f"recurrence ({recurrence} < {CRITERION_RECURRENCE_MIN})")
+        if classifiable and effect.get("state") == "NOT_YET_MEASURABLE":
+            missing.append(
+                "measured_effect (NOT_YET_MEASURABLE: "
+                f"{effect['evidence'].get('decisive_after', 0)} decisive outcomes after "
+                f"the lesson, need {CRITERION_MIN_AFTER_OUTCOMES})"
+            )
+        elif classifiable and not effect.get("met"):
+            missing.append(f"measured_effect ({effect.get('state')})")
+        reason = "Missing: " + ", ".join(missing)
 
     return {
         "lesson_id": lesson_id,
         "error_type": error_type,
         "recurrence": recurrence,
         "mean_brier": mean_brier,
-        "criteria": {
-            "recurrence": has_recurrence,
-            "measured_effect": has_measurement,
-            "external_validation": has_external_validation,
-        },
+        "criteria": criteria,
+        "criteria_evaluated": list(criteria.keys()),
+        "criterion_dropped": CRITERION_3_DROPPED,
+        "precondition": {"classifiable": classifiable},
         "eligible": eligible,
-        "reason": (
-            "Meets all criteria"
-            if eligible
-            else f"Missing: {', '.join(k for k, v in {'recurrence': has_recurrence, 'measurement': has_measurement, 'external_validation': has_external_validation}.items() if not v)}"
-        ),
+        "reason": reason,
     }
+
+
+def _write_policy_candidates(promoted: list[dict]) -> int:
+    """Append promoted lessons to the policy-candidate ledger.
+
+    POLICY_CANDIDATES_FILE was defined and never written before 2026-09-21: the
+    arrow could report `promoted: 1` and leave no artifact behind, so a promotion
+    existed only inside a log line. Append-only; supersession, never rewrite.
+    """
+    if not promoted:
+        return 0
+    POLICY_CANDIDATES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(POLICY_CANDIDATES_FILE, "a") as f:
+        for p in promoted:
+            f.write(
+                json.dumps(
+                    {
+                        "candidate_id": f"polcand-{p['lesson_id']}",
+                        "lesson_id": p["lesson_id"],
+                        "error_type": p["error_type"],
+                        "recurrence": p["recurrence"],
+                        "criteria": p["criteria"],
+                        "evidence": (p["criteria"].get("measured_effect") or {}).get(
+                            "evidence"
+                        ),
+                        "status": "POLICY_CANDIDATE",
+                        "created_at": _now_iso(),
+                        # Not self-authorising: the loop proposes, it does not
+                        # deploy. See the criteria comment.
+                        "requires": (
+                            "authorised deployment (F13/kernel) — this candidate "
+                            "carries evidence, not authority"
+                        ),
+                    },
+                    default=str,
+                )
+                + "\n"
+            )
+    return len(promoted)
 
 
 # ───────────────────────── STATE SNAPSHOT ─────────────────────────
@@ -287,6 +483,10 @@ def _store_state() -> dict:
         ),
         "lessons_total": len(lessons),
         "lesson_candidates": len(get_candidates()),
+        # State must show the blindness, not just the lessons: an outcome the
+        # classifier could not explain is invisible in lessons_total. (2026-09-21)
+        "unclassified_outcomes_total": len(load_insufficient()),
+        "lesson_health": lesson_health(),
     }
 
 
@@ -416,6 +616,7 @@ def run_full_loop(dry_run: bool = False) -> dict:
         "predictions_new": (result["arrows"]["events_to_predictions"]["delta"]
                             .get("new_generated", 0)),
         "lessons_extracted": o2l.get("lessons_extracted", 0),
+        "outcomes_unclassified": o2l.get("outcomes_unclassified", 0),
         "policies_promoted": m2p.get("promoted", 0),
     }
 

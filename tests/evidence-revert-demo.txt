@@ -1,0 +1,29 @@
+target        : /root/chron/chron_prediction.py
+pre-revert sha: 6d5b1ae34594f15bf4d8bfe804a407ba0f798c55f9ff9588e96059b23d3f6464
+restore source: /root/chron/.backup-learning-loop-20260921T032325Z/chron_prediction.py.MINE
+reverted sha  : e8a14e5a8567cf0e23a3120225f99889c1f0eedcf0f8d76067066f27ad4ab6e0  (generator wiring removed)
+
+--- suite on REVERTED wiring (exit 1) ---
+  [FAIL] emitted confidences are NOT the raw proposals — 12 proposals vs 12 emitted
+  [FAIL] every prediction carries the audit trail: got=['confidence_proposed', 'confidence_calibrated', 'calibration_quality', 'calibration_snapshot', 'recalibrat
+  [FAIL] quality propagated from the store: got=[{'claim': 'PETRONAS dividen to federal government will be ≥ RM30b for FY2027', 'expected_outcome': '≥30b', 'confi
+  [FAIL] emitted confidence == calibrated: got=[{'claim': 'PETRONAS dividen to federal government will be ≥ RM30b for FY2027', 'expected_outcome': '≥30b', 'confid
+  [FAIL] a correction is due for at least one prediction — 0 of 12
+  [FAIL] snapshot digest records effective_n: got=None want=60
+  [FAIL] snapshot digest records accuracy: got=None want=0.4
+  [FAIL] snapshot digest names its source file: got=None want='/tmp/chron-calib-test-eauixg5m/calibration.json'
+  [FAIL] lessons are consumed and audited: got=None want=1
+  [FAIL] the actionable lesson is labelled actionable: got=None want=1
+  [FAIL] no lesson is silently applied as policy: got=None want=False
+  [FAIL] empty store ⇒ confidence passed through unaltered: got=[{'claim': 'PETRONAS dividen to federal government will be ≥ RM30b for FY2027', 'expected_outcome'
+  [FAIL] empty store ⇒ quality NONE: got=[None] want=['NONE']
+  RESULT: FAIL — 13 check(s) failed: ['emitted confidences are NOT the raw proposals', 'every prediction carries the audit trail', 'quality propagated from the st
+  checks: 51 passed, 13 failed
+  full output: /root/chron/tests/evidence-reverted-suite.txt
+
+restored sha  : 6d5b1ae34594f15bf4d8bfe804a407ba0f798c55f9ff9588e96059b23d3f6464
+
+--- suite on RESTORED wiring (exit 0) ---
+  RESULT: PASS — verified outcomes now change future confidence
+
+RESULT: PASS — suite fails on the old behaviour and passes on the new, and the file was restored byte-identically
