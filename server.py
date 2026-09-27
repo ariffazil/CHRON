@@ -46,7 +46,7 @@ from chron.chron_verify import (
     _is_already_verified,
 )
 from chron.chron_learn import extract_lessons, load_lessons, get_candidates
-from chron.chron_prediction import verify_prediction, create_prediction
+from chron.chron_prediction import verify_prediction, create_prediction, resolution_states
 from chron.chron_episode import verify_from_result, predict_from_prediction
 from chron.chron_attention_debt import get_attention_debt, get_ad_summary
 from chron.chron_proxy_reality import (
@@ -351,6 +351,7 @@ def chron_store_stats() -> dict:
     unverifiable = [v for v in verified if v.get("verdict") == "UNVERIFIABLE"]
     orphans = [v for v in verified if v.get("orphan")]
     due = get_due()
+    rstates = resolution_states()
 
     return {
         "episodes": {
@@ -364,6 +365,11 @@ def chron_store_stats() -> dict:
             "unverifiable": len(unverifiable),
             "orphan_verification_records": len(orphans),
             "due_now": len(due),
+            # Resolution-process states (audit 2026-09-25 #2) — derived, never
+            # mutated: OPEN / DUE / AWAITING_EVIDENCE / UNRESOLVABLE. The
+            # complement of these ids is the RESOLVED set.
+            "resolution_states": {k: len(v) for k, v in rstates.items()},
+            "resolution_states_detail": rstates,
         },
         "lessons": {
             "total": len(lessons),
