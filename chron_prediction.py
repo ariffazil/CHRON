@@ -304,6 +304,84 @@ def get_due() -> list[dict]:
     return due
 
 
+# ─────────────────── RESOLUTION-PROCESS STATES (read-time) ───────────────────
+# Audit 2026-09-25 (F13-relayed, priority #2): the birth store only knows
+# ACTIVE; the process needs DUE / AWAITING_EVIDENCE / RESOLVED / UNRESOLVABLE.
+# Pure derivation at read time — no record is mutated (immutability invariant),
+# so this can never rewrite history to look right.
+
+VERIFICATION_ATTEMPTS = Path("/root/chron/data/verification_attempts.jsonl")
+
+
+def _latest_attempt(pid: str) -> dict:
+    """Latest verifier attempt for one prediction (attempts log, last wins)."""
+    latest: dict = {}
+    if not VERIFICATION_ATTEMPTS.exists():
+        return latest
+    with open(VERIFICATION_ATTEMPTS) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("prediction_id") == pid:
+                latest = rec
+    return latest
+
+
+def resolution_state(pred: dict, verif: dict | None = None) -> str:
+    """Classify one prediction's resolution-process state (read-time).
+
+    RESOLVED          — decisive verdict (CORRECT/INCORRECT) in the ledger
+    AWAITING_EVIDENCE — due; verifier ran; evidence not yet available
+                        (delay of data is not failure of the prediction)
+    UNRESOLVABLE      — no machine probe bound and no human-witness audience:
+                        nothing can ever close it automatically
+    DUE               — verify_at arrived, still unresolved, reviewable now
+    OPEN              — not yet due
+    """
+    pid = pred.get("prediction_id")
+    v = verif if verif is not None else load_verifications().get(pid, {})
+    if _canonical_verdict(v) in _DECISIVE:
+        return "RESOLVED"
+    now = datetime.now(timezone.utc)
+    try:
+        is_due = now >= datetime.fromisoformat(pred["verify_at"].replace("Z", "+00:00"))
+    except Exception:
+        is_due = False
+    if not is_due:
+        return "OPEN"
+    if _canonical_verdict(v) == VERDICT_UNVERIFIABLE:
+        return "AWAITING_EVIDENCE"
+    if _latest_attempt(pid).get("error_class") == "AWAITING_EVIDENCE":
+        return "AWAITING_EVIDENCE"
+    if pred.get("binding") == "NO_MACHINE_PROBE" and pred.get("audience") != "arif":
+        return "UNRESOLVABLE"
+    return "DUE"
+
+
+def resolution_states() -> dict[str, list[str]]:
+    """Resolution-process state for every active prediction, as id lists.
+
+    The complement of ``decided_ids()``: RESOLVED count = 25-active minus
+    these. Consumers: chron_store_stats (MCP), /health census, AAA surfaces.
+    """
+    out: dict[str, list[str]] = {
+        "OPEN": [],
+        "DUE": [],
+        "AWAITING_EVIDENCE": [],
+        "UNRESOLVABLE": [],
+    }
+    verifs = load_verifications()
+    for p in get_active():
+        state = resolution_state(p, verifs.get(p.get("prediction_id"), {}))
+        out.setdefault(state, []).append(p["prediction_id"])
+    return out
+
+
 def get_verified(limit: int = 50, include_void: bool = False) -> list[dict]:
     """Joined view: birth snapshot + verification outcome.
 

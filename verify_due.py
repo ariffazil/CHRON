@@ -86,7 +86,37 @@ def mcp_call(base_url, tool_name, arguments):
 
 
 def chron_call(tool_name, arguments):
-    return mcp_call(CHRON_URL, tool_name, arguments)
+    try:
+        return mcp_call(CHRON_URL, tool_name, arguments)
+    except Exception as e:
+        # Local direct module fallback when standalone HTTP endpoint is offline
+        try:
+            import sys
+            sys.path.insert(0, '/root')
+            sys.path.insert(0, '/root/chron')
+            if tool_name == "chron_predictions_due":
+                from chron.chron_prediction import get_due
+                due = get_due()
+                return {"result": {"content": [{"type": "text", "text": json.dumps({"due": due, "count": len(due)})}]}}
+            elif tool_name == "chron_record_verification":
+                from chron.chron_prediction import load_predictions, verify_prediction, VERIFICATION_LOG, compute_calibration, save_calibration
+                preds = {p["prediction_id"]: p for p in load_predictions()}
+                pid = arguments.get("prediction_id")
+                if pid in preds:
+                    v = verify_prediction(
+                        preds[pid],
+                        observed_outcome=arguments.get("observed_outcome", ""),
+                        correct=arguments.get("correct", False),
+                        error_class=arguments.get("error_class"),
+                    )
+                    with open(VERIFICATION_LOG, "a") as f:
+                        f.write(json.dumps(v, default=str) + "\n")
+                    calib = compute_calibration()
+                    save_calibration(calib)
+                    return {"result": {"content": [{"type": "text", "text": json.dumps({"status": "OK", "verification": v})}]}}
+        except Exception as inner_e:
+            pass
+        raise e
 
 
 def wealth_call(tool_name, arguments):
