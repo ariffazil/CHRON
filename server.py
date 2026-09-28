@@ -1,8 +1,14 @@
 """CHRON MCP Server — FastMCP surface for temporal cortex.
 
-Exposes CHRON's prediction, verification, calibration, and episode
-stores as MCP tools. Agents call these on wake-up to gain temporal
-awareness without background consciousness.
+Exposes CHRON's prediction, verification, calibration, episode,
+lesson, proxy-reality, and attention-debt stores as MCP tools.
+
+19 tools · 8 resources · 4 prompts · v4.0.6 (2026-09-28)
+
+Arrow of Time lifecycle:
+    Event → Prediction → Verification → Error → Lesson → Policy
+    chron_create_event     chron_record_verification    chron_lessons
+    chron_generate_preds   chron_resolve_unverifiable
 
 Port: 18102 (CHRON_MCP_PORT env override)
 Transport: streamable-http (federation /mcp pattern)
@@ -46,7 +52,11 @@ from chron.chron_verify import (
     _is_already_verified,
 )
 from chron.chron_learn import extract_lessons, load_lessons, get_candidates
-from chron.chron_prediction import verify_prediction, create_prediction, resolution_states
+from chron.chron_prediction import (
+    verify_prediction,
+    create_prediction,
+    resolution_states,
+)
 from chron.chron_episode import verify_from_result, predict_from_prediction
 from chron.chron_attention_debt import get_attention_debt, get_ad_summary
 from chron.chron_proxy_reality import (
@@ -105,10 +115,12 @@ class EventKind(str, Enum):
 mcp = FastMCP(
     "CHRON",
     instructions=(
-        "CHRON — Temporal Consequence Tracker. "
-        "Predicts, verifies, calibrates, learns. "
+        "CHRON — Temporal Consequence Tracker. v4.0.6. "
+        "19 tools across the Arrow of Time: Event → Prediction → Verification → "
+        "Error → Lesson. Predicts, verifies, calibrates, learns. "
         "Not a scheduler. Not a memory store. "
-        "The organ that answers: What did we expect? What happened? Were we wrong?"
+        "The organ that answers: What did we expect? What happened? Were we wrong? "
+        "What did we learn? Are our proxies gaming us?"
     ),
 )
 
@@ -128,6 +140,11 @@ def chron_predictions_due() -> dict:
 
     Returns predictions that CHRON expects to verify NOW.
     This is the 'what did we expect vs what happened' signal.
+    Call this BEFORE chron_record_verification to find what needs closing.
+
+    The Arrow of Time: active → due → verified → calibrated → lesson.
+    This tool sits at the active→due boundary. Every prediction returned
+    here represents an unpaid epistemic debt.
     """
     due = get_due()
     return {
@@ -142,8 +159,12 @@ def chron_predictions_due() -> dict:
 def chron_calibration_state() -> dict:
     """Get calibration statistics — how wrong have we been?
 
-    Returns Brier scores, accuracy, error distribution.
-    The institution's epistemic health metric.
+    Returns Brier scores, accuracy, error distribution, and per-error-class
+    breakdown. The institution's epistemic health metric.
+
+    A Brier score of 0.25 = coin-flip calibration. Below 0.15 = useful.
+    Accuracy below 60% at high confidence (>0.8) = systematic overconfidence.
+    This is the evidence that drives the Arrow of Time: verify → calibrate.
     """
     calibration = compute_calibration()
     return {
@@ -158,6 +179,10 @@ def chron_last_loop() -> dict:
 
     Returns the most recent metabolic cycle result:
     episodes created, predictions verified, lessons extracted.
+
+    If this shows 0 verifications and 0 lessons across multiple loops,
+    CHRON is in observation-only mode — the prediction→verification→lesson
+    pipeline is broken. This is the canary for metabolic health.
     """
     loop_log = Path("/root/chron/data/loop_log.jsonl")
     if not loop_log.exists():
@@ -187,7 +212,11 @@ def chron_last_loop() -> dict:
 
 @mcp.tool()
 def chron_active_events(audience: AudienceFilter = AudienceFilter.all) -> dict:
-    """Get chron_events filtered by audience.
+    """Get chron_events filtered by audience — the institution's known temporal anchors.
+
+    Returns events with computed days_until for each target_date.
+    Events are the source material from which predictions are generated.
+    Call chron_generate_predictions after adding new events.
 
     Args:
         audience: Filter —
@@ -201,7 +230,7 @@ def chron_active_events(audience: AudienceFilter = AudienceFilter.all) -> dict:
         'both' means "addressed to both principals" — shared-only.
         It does NOT mean "return everything". Use 'all' for full inventory.
 
-    Phase 1 fix: invalid audience values now FAIL-LOOSED via Pydantic enum
+    Phase 1 fix: invalid audience values now FAIL-CLOSED via Pydantic enum
     validation. Previously 'GARBAGE' silently returned the 'both' subset —
     a privacy bug. Now such requests are rejected at the protocol boundary.
     """
@@ -269,32 +298,26 @@ def chron_active_predictions(
     source_id: str = "",
     audience: AudienceFilter = AudienceFilter.all,
 ) -> dict:
-    """Get all active (unverified) predictions.
+    """Get all active (unverified) predictions — the institution's current
+    expectations about the future that haven't been tested yet.
 
-    The institution's current expectations about the future.
+    Every active prediction is a promise. CHRON will hold it until
+    its verify_at arrives, then it becomes due. Callers should cross-
+    reference with chron_predictions_due() to see what's overdue.
 
     Args:
         limit: Max predictions to return (default 50)
         source_id: Filter by source event ID (e.g. 'budget-2027'). Empty = all.
         audience: Privacy filter — same contract as chron_active_events:
-            'arif'  → predictions addressed to arif + shared (audience in ['arif','both'])
-            'syed'  → predictions addressed to syed + shared (audience in ['syed','both'])
-            'both'  → SHARED-ONLY (audience == 'both'). NOT a superset — this is the
-                      correct value for any two-person surface such as the ALPHA-ZEN card.
-            'all'   → EVERY prediction regardless of audience (full inventory).
+            'arif'  → predictions addressed to arif + shared
+            'syed'  → predictions addressed to syed + shared
+            'both'  → SHARED-ONLY. Correct for two-person surfaces.
+            'all'   → EVERY prediction (full inventory).
             Default: 'all'.
 
-    PRIVACY LAW (F13, 2026-09-19) — receipt rcpt-2026-09-19-chron-audience-leak-fix:
-        A prediction whose audience cannot be resolved is NOT shared. When a
-        specific audience is requested, unresolved rows are EXCLUDED, never
-        included by default. Resolution order: explicit `audience` on the row,
-        else the audience of the source event named by `source_id`, else
-        UNRESOLVED (excluded). The number excluded is returned in
-        `audience_unresolved` so the gap is visible rather than silent.
-
-    Phase 1 fix: audience now uses AudienceFilter enum. Invalid values are
-    rejected at the protocol boundary rather than silently producing wrong
-    privacy filters.
+    PRIVACY LAW (F13, 2026-09-19):
+        Unresolved-audience rows are EXCLUDED (fail-safe), never included
+        by default. The count excluded is returned in audience_unresolved.
     """
     aud = audience.value
     preds = get_active()
@@ -411,9 +434,16 @@ def chron_verified_predictions(limit: int = 50, include_void: bool = False) -> d
 def chron_temporal_briefing() -> dict:
     """The full temporal briefing for agent wake-up.
 
-    Combines predictions due, calibration state, last loop,
-    and active events into one structured packet.
-    This is what gets injected into carry_forward.json.
+    Combines predictions due, calibration state, attention debt,
+    last loop, and active events into one structured packet.
+    This is what gets injected into carry_forward.json at session init.
+
+    Call this FIRST when an agent wakes up. It answers:
+    - What did we expect? (active predictions)
+    - What's overdue? (predictions due)
+    - How wrong have we been? (calibration)
+    - What's the attention backlog? (attention debt)
+    - What did the last metabolic cycle do? (last loop)
     """
     return {
         "predictions_due": get_due(),
@@ -446,23 +476,27 @@ def chron_record_verification(
     observed_outcome: str,
     correct: bool,
 ) -> dict:
-    """Record a verification outcome for a prediction. Closes the loop.
+    """Record a verification outcome for a prediction. CLOSES THE ARROW.
 
-    This is the WRITE surface that completes the Arrow of Time.
+    This is the WRITE surface that completes the Arrow of Time:
+    active → due → VERIFIED → calibrated → lesson.
+
     An agent observes reality, compares to the prediction, and records
-    whether the prediction was correct or incorrect.
+    whether the prediction was correct or incorrect. CHRON then computes
+    the Brier score and writes a permanent verification record.
+
+    After calling this, call chron_calibration_state() to see updated
+    calibration, and chron_lessons() to check for extractable lessons.
 
     Args:
         prediction_id: The prediction to verify (e.g. 'pred-b73cba59ab86')
-        observed_outcome: What actually happened (free text)
+        observed_outcome: What actually happened (free text — becomes evidence)
         correct: True if prediction was correct, False if incorrect
 
     Returns:
-        Verification record with Brier score, or error if prediction not found.
-
-    Phase 1 fix: when prediction not found, return value includes
-    `_is_error: true` so callers can branch on contract violation rather
-    than treating semantic-failure as success.
+        Verification record with Brier score, verdict, and verification_id.
+        If the prediction has already been verified, returns ALREADY_VERIFIED.
+        If the prediction is not found, returns _is_error: true.
     """
     # Find the prediction
     preds = load_predictions()
@@ -647,34 +681,39 @@ def _functions_from_jsonl_safe() -> dict[str, int]:
 def chron_index_resource() -> str:
     """
     Capability index — what CHRON can do. Read-once discovery surface.
+    Updated 2026-09-28: 19 tools, 8 resources, 4 prompts.
     """
     return json.dumps(
         {
             "organ": "CHRON",
-            "version": "4.0.5",
+            "version": "4.0.6",
             "protocol_era": "2025-06-18",
+            "updated": "2026-09-28",
             "doctrine": (
                 "Temporal consequence tracker. Predicts, verifies, calibrates, learns. "
                 "Not a scheduler. Not a memory store. "
                 "The organ that answers: What did we expect? What happened? Were we wrong?"
             ),
             "tools": [
-                "chron_predictions_due",
-                "chron_calibration_state",
-                "chron_last_loop",
                 "chron_active_events",
                 "chron_active_predictions",
-                "chron_store_stats",
-                "chron_verified_predictions",
-                "chron_temporal_briefing",
-                "chron_generate_predictions",
-                "chron_record_verification",
                 "chron_attention_debt",
+                "chron_calibration_state",
                 "chron_create_event",
-                "chron_proxy_reality_register",
+                "chron_episodes",
+                "chron_generate_predictions",
+                "chron_last_loop",
+                "chron_lessons",
+                "chron_predictions_due",
                 "chron_proxy_reality_observe",
+                "chron_proxy_reality_register",
                 "chron_proxy_reality_state",
                 "chron_reconcile_state",
+                "chron_record_verification",
+                "chron_resolve_unverifiable",
+                "chron_store_stats",
+                "chron_temporal_briefing",
+                "chron_verified_predictions",
             ],
             "resources": [
                 "chron://index",
@@ -889,8 +928,142 @@ def chron_attention_debt() -> dict:
     delays its detection, trust failure propagates it, price records it.
 
     This tool measures the "attention failure delays its detection" part.
+    AD > 50 = material backlog. AD growth rate > 2/day = attention system
+    is falling behind. Call chron_predictions_due() to identify the specific
+    items contributing to debt.
     """
     return get_attention_debt()
+
+
+@mcp.tool()
+def chron_lessons(limit: int = 20, status: str = "all") -> dict:
+    """Get extracted lessons — what the institution has learned from verified outcomes.
+
+    Lessons are the final stage of the Arrow of Time:
+    Event → Prediction → Verification → Error → LESSON.
+
+    A lesson is only useful if it changes future behavior. Lessons with
+    status=CANDIDATE are awaiting human ratification. Lessons with
+    status=ACTIVE have been ratified and should constrain future predictions.
+
+    The calibration gap (accuracy vs confidence) should shrink as lessons
+    accumulate. If it doesn't, the lessons aren't being metabolized.
+
+    Args:
+        limit: Max lessons to return (default 20)
+        status: Filter — 'all', 'active', 'candidate', 'archived'
+    """
+    lessons = load_lessons()
+    if status != "all":
+        lessons = [l for l in lessons if l.get("status") == status.upper()]
+    return {
+        "lessons": lessons[:limit],
+        "count": len(lessons[:limit]),
+        "total": len(load_lessons()),
+        "candidates": len(
+            [l for l in load_lessons() if l.get("status") == "CANDIDATE"]
+        ),
+        "query_time": _now_iso(),
+    }
+
+
+@mcp.tool()
+def chron_episodes(
+    function: str = "",
+    principal: str = "",
+    since: str = "",
+    limit: int = 50,
+) -> dict:
+    """Query CHRON episodes — the raw temporal ledger.
+
+    Episodes are the atomic temporal facts: observations, predictions,
+    verifications, and lesson extractions. Each episode has a function
+    (observe/predict/verify/learn), a principal (arif/syed/both), and
+    a valid_time.
+
+    Use this for forensic queries: "what did we know and when?"
+    The episode store is append-only JSONL — immutable once written.
+
+    Args:
+        function: Filter by function — 'observe', 'predict', 'verify', 'learn'
+        principal: Filter by principal — 'arif', 'syed', 'both'
+        since: ISO timestamp — only episodes after this time
+        limit: Max episodes to return (default 50)
+    """
+    store = get_store()
+    episodes = store.query(
+        function=function if function else None,
+        principal=principal if principal else None,
+        since=since if since else None,
+        limit=limit,
+    )
+    return {
+        "episodes": episodes,
+        "count": len(episodes),
+        "total_store": store.count(),
+        "functions": store.functions(),
+        "query_time": _now_iso(),
+    }
+
+
+@mcp.tool()
+def chron_resolve_unverifiable(
+    prediction_id: str,
+    reason: str = "insufficient_evidence",
+) -> dict:
+    """Resolve a prediction as UNVERIFIABLE — close it without scoring.
+
+    Some predictions cannot be verified: the evidence never arrived,
+    the question became meaningless, or the measurement window closed.
+    UNVERIFIABLE predictions are removed from the active set (stopping
+    attention debt accumulation) but NOT scored in calibration.
+
+    This is distinct from VERIFIED_INCORRECT: the prediction wasn't wrong,
+    it was untestable.
+
+    Args:
+        prediction_id: The prediction to resolve
+        reason: Why it cannot be verified (free text)
+    """
+    preds = load_predictions()
+    pred = next((p for p in preds if p["prediction_id"] == prediction_id), None)
+    if not pred:
+        return {
+            "_is_error": True,
+            "error_code": "PREDICTION_NOT_FOUND",
+            "error": f"Prediction {prediction_id} not found",
+            "query_time": _now_iso(),
+        }
+
+    if _is_already_verified(prediction_id):
+        return {
+            "status": "ALREADY_VERIFIED",
+            "prediction_id": prediction_id,
+            "query_time": _now_iso(),
+        }
+
+    verif_record = {
+        "verification_id": f"vrf-{prediction_id}-UNVERIFIABLE",
+        "prediction_id": prediction_id,
+        "verdict": "UNVERIFIABLE",
+        "brier_score": None,
+        "observed_outcome": f"UNVERIFIABLE: {reason}",
+        "verified_at": _now_iso(),
+        "verified_by": "chron_resolve_unverifiable",
+    }
+    _append_verification_record(verif_record)
+
+    store = get_store()
+    ep = verify_from_result(pred, f"UNVERIFIABLE: {reason}", None, "UNVERIFIABLE")
+    store.append(ep)
+
+    return {
+        "status": "UNVERIFIABLE",
+        "prediction_id": prediction_id,
+        "reason": reason,
+        "claim": pred.get("claim"),
+        "query_time": _now_iso(),
+    }
 
 
 @mcp.tool()
@@ -906,19 +1079,20 @@ def chron_create_event(
     consequence: str = "MEDIUM",
     actionability: str = "WATCH",
 ) -> dict:
-    """Create a new event in chron_events.json.
+    """Create a new event in chron_events.json — plant a temporal stake.
 
-    Allows agents to add temporal commitments that CHRON will track.
-    Use for: deadlines, regulatory windows, market events, personal milestones.
+    Events are the raw material. After creating an event, call
+    chron_generate_predictions() to create prediction objects from it.
+    The chain: Event → Prediction → Verification → Lesson.
 
     Args:
         event_id: Unique kebab-case ID (e.g. 'my-004-inflation-oct')
         title: Human-readable event description
         target_date: ISO date YYYY-MM-DD
-        kind: Event category (FISCAL, MARKET_EVENT, REGULATORY_WINDOW, PERSONAL_SAFE, MACRO_INDICATOR, OBSERVATION)
-        audience: Who sees this ('arif', 'syed', 'both')
+        kind: FISCAL, MARKET_EVENT, REGULATORY_WINDOW, PERSONAL_SAFE, MACRO_INDICATOR, MONETARY_POLICY, OBSERVATION
+        audience: 'arif', 'syed', or 'both'
         source: Where this comes from (URL, institution, agent)
-        note: Additional context
+        note: Additional context — why this event matters
         confidence: CONFIRMED / LIKELY / ANNOUNCED / PREDICTED / TENTATIVE
         consequence: HIGH / MEDIUM / LOW
         actionability: PREPARE / WATCH / MONITOR
@@ -995,6 +1169,13 @@ def chron_proxy_reality_register(
     defend. CHRON tracks observations over time and flags divergence:
     proxy improving while reality degrades = GAMING.
 
+    This is the Proxy-Reality Paradox defense: every metric can be gamed.
+    The only defense is to measure both the proxy AND the reality it claims
+    to represent. Without observations, this is empty instrumentation.
+
+    After registering, call chron_proxy_reality_observe() to feed data.
+    14 pairs are pre-seeded. 0 currently have observations.
+
     Args:
         organ: organ name (e.g. 'GEOX', 'WEALTH', '333-AGI')
         proxy_name: short metric name (e.g. 'test_pass_rate')
@@ -1002,10 +1183,7 @@ def chron_proxy_reality_register(
         reality_name: short reality name (e.g. 'intended_outcome')
         reality_description: what reality it should represent
         divergence_threshold: min delta to flag divergence (0.0-1.0)
-        diagnostic_question: the 'every X must ask' question
-
-    Returns:
-        The registered pair record.
+        diagnostic_question: the 'what must this organ ask itself?' question
     """
     pair = register_pair(
         organ=organ,
@@ -1078,17 +1256,17 @@ def chron_proxy_reality_state(organ: str = "", window: int = 5) -> dict:
 
     Divergence states:
         HEALTHY     — proxy ↑, reality ↑ (or both stable)
-        GAMING      — proxy ↑, reality ↓ (specification gaming)
-        WRONG_PROXY — proxy ↓, reality ↑ (wrong metric)
+        GAMING      — proxy ↑, reality ↓ (specification gaming / Goodhart)
+        WRONG_PROXY — proxy ↓, reality ↑ (measuring the wrong thing)
         FAILING     — proxy ↓, reality ↓ (systemic degradation)
-        UNKNOWN     — insufficient data
+        UNKNOWN     — insufficient data (no observations yet)
+
+    Currently 14 pairs registered, 0 with observations. Until agents call
+    chron_proxy_reality_observe(), ALL pairs will return UNKNOWN.
 
     Args:
         organ: filter by organ name (empty = all organs)
         window: number of recent observations for trend computation (default 5)
-
-    Returns:
-        Per-pair correlation state + summary.
     """
     # Auto-seed defaults on first call
     pr_seed_defaults()
@@ -1224,13 +1402,21 @@ async def health(request):
 def briefing_prompt(focus: str = "today") -> str:
     """
     Construct a temporal-briefing intent. Calls chron_temporal_briefing()
-    to pull predictions-due, calibration, last_loop, and active events.
+    to pull predictions-due, calibration, attention_debt, last_loop,
+    and active events into one structured packet.
+
+    After the briefing, the agent should:
+    1. Call chron_predictions_due() for items needing verification NOW
+    2. Call chron_attention_debt() for the backlog state
+    3. Call chron_calibration_state() for epistemic health
+    4. Call chron_proxy_reality_state() for the gaming detector
     """
     return (
         f"Run chron_temporal_briefing() with focus on '{focus}'. "
         "Surface: (1) what predictions are due NOW, (2) calibration accuracy "
-        "and Brier score, (3) last loop summary, (4) active events ordered by "
-        "days_until. If anything is high-consequence and due soon, name it first. "
+        "and Brier score, (3) attention debt trend, (4) last loop summary, "
+        "(5) active events ordered by days_until. "
+        "If anything is high-consequence and due soon, name it first. "
         "Plain BM if human-facing, structured JSON if agent-facing."
     )
 
@@ -1238,12 +1424,17 @@ def briefing_prompt(focus: str = "today") -> str:
 @mcp.prompt(title="Chron Forecast")
 def forecast_prompt(horizon_days: int = 7) -> str:
     """
-    Construct a forecast intent. Calls chron_active_events(horizon=horizon_days)
-    + chron_active_predictions() to enumerate expectations.
+    Construct a forecast intent. Calls chron_active_events(audience='both')
+    and chron_active_predictions() to enumerate expectations.
+
+    Output: ordered list of (event_date, prediction, confidence, verifier).
+    Flag any prediction with confidence < 0.5 or no falsifier.
+    Include 'next verification' timestamp from chron_predictions_due().
     """
     return (
         f"Generate a {horizon_days}-day forward forecast. "
         "Call chron_active_events() with audience='both' and chron_active_predictions(). "
+        "Call chron_predictions_due() to identify imminent verification obligations. "
         "Output: ordered list of (event_date, prediction, confidence, verifier). "
         "Flag any prediction with confidence < 0.5 or no falsifier. "
         "Include 'next verification' timestamp."
@@ -1254,31 +1445,46 @@ def forecast_prompt(horizon_days: int = 7) -> str:
 def calibrate_prompt(window: int = 30) -> str:
     """
     Construct a calibration-check intent. Calls chron_calibration_state()
-    and chron_verified_predictions(limit=window).
+    and chron_verified_predictions(limit=100).
+
+    Group by error_type. Compute mean Brier per group.
+    Identify which prediction categories are systematically over- or
+    under-confident. Output actionable calibration adjustment —
+    DO NOT auto-apply.
     """
     return (
         f"Run a calibration audit over the last {window} days. "
-        "Call chron_calibration_state() and chron_verified_predictions(limit=100). "
+        "Call chron_calibration_state(), chron_verified_predictions(limit=100), "
+        "and chron_lessons() to cross-reference what was learned. "
         "Group by error_type. Compute mean Brier per group. "
         "Identify which prediction categories are systematically over- or "
-        "under-confident. Output: actionable calibration adjustment proposal — "
-        "DO NOT auto-apply."
+        "under-confident. Check if existing lessons address the top error modes. "
+        "Output: actionable calibration adjustment proposal — DO NOT auto-apply."
     )
 
 
 @mcp.prompt(title="Chron Audit")
 def audit_prompt(scope: str = "store") -> str:
     """
-    Construct an audit intent. Calls chron_reconcile_state(force=...)
-    and chron_store_stats() to verify store integrity.
+    Construct an audit intent. Calls chron_reconcile_state(force=true),
+    chron_store_stats(), and chron_proxy_reality_state().
+
+    Verify: (1) episode_count matches JSONL line count,
+    (2) invariant_held=true, (3) all active predictions have valid verify_at,
+    (4) all verified records have brier_score,
+    (5) proxy_reality pairs have observation coverage.
+
+    Report any drift or invariant violation as HOLD.
     """
     return (
         f"Run a CHRON audit on scope='{scope}'. "
-        "Call chron_reconcile_state(force=true) and chron_store_stats(). "
+        "Call chron_reconcile_state(force=true), chron_store_stats(), "
+        "chron_attention_debt(), and chron_proxy_reality_state(). "
         "Verify: (1) episode_count matches JSONL line count, "
         "(2) invariant_held=true, (3) all active predictions have valid verify_at, "
-        "(4) all verified records have brier_score. "
-        "Report any drift or invariant violation as HOLD."
+        "(4) all verified records have brier_score, "
+        "(5) proxy_reality pairs have observation coverage > 0. "
+        "Report any drift, invariant violation, or empty proxy-reality pairs as HOLD."
     )
 
 

@@ -1,6 +1,12 @@
 __pycache__/
 *.pyc
 .backup-*
+*.bak*
+.*.bak*
+*.bak-*
+.pre-canonical-*
+.snapshot-*
+*.sibling-*
 verify_log.jsonl
 verify_log.txt
 data/*.jsonl
