@@ -40,6 +40,7 @@ _now_iso = lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 def _make_debt_id(source: str, ref_id: str) -> str:
     """Deterministic debt ID from source + reference."""
     import hashlib
+
     h = hashlib.sha256(f"{source}:{ref_id}".encode()).hexdigest()[:8]
     return f"ad-{h}"
 
@@ -101,13 +102,59 @@ def _resolve_debt(debt_id: str, resolution: str) -> Optional[dict]:
     items = _load_all_debt()
     target = None
     for item in items:
-        if item.get("debt_id") == debt_id and item.get("status") not in ("RESOLVED", "IRRELEVANT"):
+        if item.get("debt_id") == debt_id and item.get("status") not in (
+            "RESOLVED",
+            "IRRELEVANT",
+        ):
             target = item
     if not target:
         return None
-    resolved = {**target, "status": "RESOLVED", "resolved_at": _now_iso(), "resolution": resolution}
+    resolved = {
+        **target,
+        "status": "RESOLVED",
+        "resolved_at": _now_iso(),
+        "resolution": resolution,
+    }
     _append_debt(resolved)
     return resolved
+
+
+def _reconcile_open_items(open_items: list[dict]) -> list[dict]:
+    """Re-verify persisted OPEN claims against current reality (F2).
+
+    An OPEN debt item is a claim that a contradiction is still unresolved.
+    Prediction birth records are immutable (they always read ``status: ACTIVE``)
+    and verdicts live in the verification ledger — so a persisted OPEN row can
+    outlive the condition that created it: the prediction was verified AFTER
+    the debt was recorded. Nothing used to re-check this, producing phantom
+    debt that aged forever (2026-09-28: AD=60.3 driven by 8 items already
+    VERIFIED in the calibration ledger, growth 2.5/day on resolved claims).
+
+    Only decisive verdicts (CORRECT/INCORRECT via ``decided_ids``) resolve —
+    UNVERIFIABLE means awaiting evidence, which is legitimate aging debt.
+    Resolution is append-only via ``_resolve_debt`` (history preserved).
+    """
+    try:
+        from chron.chron_prediction import decided_ids, load_verifications
+
+        decided = decided_ids()
+        verifs = load_verifications()
+    except Exception:
+        return open_items  # ledger unavailable → keep claims, never silently drop (F2)
+    still_open = []
+    for item in open_items:
+        ref = item.get("ref_id")
+        did = item.get("debt_id")
+        if did and item.get("source") == "overdue_prediction" and ref in decided:
+            verdict = (verifs.get(ref) or {}).get("verdict", "DECISIVE")
+            resolved = _resolve_debt(
+                did,
+                f"auto-reconciled: verification ledger holds {verdict} — prediction no longer awaiting",
+            )
+            if resolved:
+                continue
+        still_open.append(item)
+    return still_open
 
 
 # ───────────────────────── COLLECTORS ─────────────────────────
@@ -128,18 +175,20 @@ def collect_overdue_predictions() -> list[dict]:
             continue  # not overdue
 
         overdue_days = (now - verify_at).total_seconds() / 86400
-        items.append(create_debt_item(
-            source="overdue_prediction",
-            ref_id=pred["prediction_id"],
-            description=f"Prediction overdue by {overdue_days:.0f}d: {pred.get('claim', '?')[:80]}",
-            consequence="HIGH" if overdue_days > 30 else "MEDIUM",
-            identified_at=verify_at.isoformat(),
-            extra={
-                "overdue_days": round(overdue_days, 1),
-                "original_confidence": pred.get("confidence"),
-                "claim": pred.get("claim"),
-            },
-        ))
+        items.append(
+            create_debt_item(
+                source="overdue_prediction",
+                ref_id=pred["prediction_id"],
+                description=f"Prediction overdue by {overdue_days:.0f}d: {pred.get('claim', '?')[:80]}",
+                consequence="HIGH" if overdue_days > 30 else "MEDIUM",
+                identified_at=verify_at.isoformat(),
+                extra={
+                    "overdue_days": round(overdue_days, 1),
+                    "original_confidence": pred.get("confidence"),
+                    "claim": pred.get("claim"),
+                },
+            )
+        )
     return items
 
 
@@ -161,7 +210,9 @@ def collect_unresolved_high_events() -> list[dict]:
         if not target_date:
             continue
         try:
-            target = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            target = datetime.strptime(target_date, "%Y-%m-%d").replace(
+                tzinfo=timezone.utc
+            )
         except ValueError:
             continue
 
@@ -170,18 +221,20 @@ def collect_unresolved_high_events() -> list[dict]:
             continue
 
         age_days = (now - target).total_seconds() / 86400
-        items.append(create_debt_item(
-            source="unresolved_event",
-            ref_id=event.get("id", "?"),
-            description=f"HIGH event past target by {age_days:.0f}d: {event.get('title', '?')[:80]}",
-            consequence="HIGH",
-            identified_at=target.isoformat(),
-            extra={
-                "age_days": round(age_days, 1),
-                "event_kind": event.get("kind"),
-                "original_confidence": event.get("confidence"),
-            },
-        ))
+        items.append(
+            create_debt_item(
+                source="unresolved_event",
+                ref_id=event.get("id", "?"),
+                description=f"HIGH event past target by {age_days:.0f}d: {event.get('title', '?')[:80]}",
+                consequence="HIGH",
+                identified_at=target.isoformat(),
+                extra={
+                    "age_days": round(age_days, 1),
+                    "event_kind": event.get("kind"),
+                    "original_confidence": event.get("confidence"),
+                },
+            )
+        )
     return items
 
 
@@ -208,11 +261,17 @@ def compute_attention_debt(items: Optional[list[dict]] = None) -> dict:
     now = datetime.now(timezone.utc)
     scored = []
     by_source = {}
-    by_consequence = {"HIGH": {"count": 0, "ad": 0.0}, "MEDIUM": {"count": 0, "ad": 0.0}, "LOW": {"count": 0, "ad": 0.0}}
+    by_consequence = {
+        "HIGH": {"count": 0, "ad": 0.0},
+        "MEDIUM": {"count": 0, "ad": 0.0},
+        "LOW": {"count": 0, "ad": 0.0},
+    }
 
     for item in items:
         try:
-            identified = datetime.fromisoformat(item["identified_at"].replace("Z", "+00:00"))
+            identified = datetime.fromisoformat(
+                item["identified_at"].replace("Z", "+00:00")
+            )
         except (KeyError, ValueError):
             continue
 
@@ -250,14 +309,22 @@ def compute_attention_debt(items: Optional[list[dict]] = None) -> dict:
         "total_ad": round(total_ad, 2),
         "item_count": len(scored),
         "items": scored,
-        "by_source": {k: {"count": v["count"], "ad": round(v["ad"], 2)} for k, v in by_source.items()},
-        "by_consequence": {k: {"count": v["count"], "ad": round(v["ad"], 2)} for k, v in by_consequence.items()},
+        "by_source": {
+            k: {"count": v["count"], "ad": round(v["ad"], 2)}
+            for k, v in by_source.items()
+        },
+        "by_consequence": {
+            k: {"count": v["count"], "ad": round(v["ad"], 2)}
+            for k, v in by_consequence.items()
+        },
         "oldest": {
             "debt_id": oldest["debt_id"],
             "description": oldest["description"],
             "age_days": oldest["age_days"],
             "ad_contribution": oldest["ad_contribution"],
-        } if oldest else None,
+        }
+        if oldest
+        else None,
         "growth_rate_per_day": growth_rate,
         "computed_at": _now_iso(),
     }
@@ -275,6 +342,11 @@ def collect_current_debt() -> list[dict]:
 
     # Filter to only OPEN items (not resolved)
     open_items = [v for v in seen.values() if v.get("status") == "OPEN"]
+
+    # Re-verify persisted OPEN claims against reality — phantom-debt guard (F2).
+    # An OPEN row is a claim, not a fact: the prediction may have been verified
+    # after the debt was recorded. Decisive verdict → append-only RESOLVED.
+    open_items = _reconcile_open_items(open_items)
 
     # Merge with fresh collection (new items only)
     existing_ids = {item.get("debt_id") for item in open_items}
@@ -330,7 +402,9 @@ def _compute_growth_rate(current_ad: float) -> Optional[float]:
             if line:
                 try:
                     s = json.loads(line)
-                    s["_ts"] = datetime.fromisoformat(s["recorded_at"].replace("Z", "+00:00"))
+                    s["_ts"] = datetime.fromisoformat(
+                        s["recorded_at"].replace("Z", "+00:00")
+                    )
                     snapshots.append(s)
                 except (json.JSONDecodeError, KeyError, ValueError):
                     continue

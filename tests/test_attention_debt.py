@@ -168,3 +168,65 @@ if __name__ == "__main__":
     test_t7_weighted_score()
     test_t8_by_source_breakdown()
     print("\nAll tests passed.")
+
+
+def test_t9_reconcile_resolves_verified_phantom_debt(monkeypatch, tmp_path):
+    """T9: persisted OPEN overdue_prediction item whose prediction now holds a
+    decisive verdict is auto-resolved (append-only) — phantom-debt regression.
+
+    Ground truth 2026-09-28: AD=60.3 / growth 2.5/day driven by 8 items already
+    VERIFIED in the calibration ledger; birth records are immutable so nothing
+    re-checked the persisted OPEN claims.
+    """
+    import chron.chron_attention_debt as ad
+    import chron.chron_prediction as cp
+
+    monkeypatch.setattr(ad, "DEBT_FILE", tmp_path / "attention_debt.jsonl")
+    monkeypatch.setattr(cp, "decided_ids", lambda: {"pred-phantom"})
+    monkeypatch.setattr(cp, "load_verifications", lambda: {
+        "pred-phantom": {"verdict": "VERIFIED_CORRECT", "verified_at": "2026-09-26T00:00:00Z"}
+    })
+    monkeypatch.setattr(ad, "collect_overdue_predictions", lambda: [])
+    monkeypatch.setattr(ad, "collect_unresolved_high_events", lambda: [])
+
+    item = create_debt_item(
+        source="overdue_prediction", ref_id="pred-phantom",
+        description="phantom debt", consequence="MEDIUM",
+    )
+    ad._append_debt(item)
+
+    result = ad.collect_current_debt()
+
+    # phantom no longer counted as open debt
+    assert all(i.get("ref_id") != "pred-phantom" for i in result)
+    # resolution appended (append-only, history preserved)
+    stored = ad._load_all_debt()
+    resolved_rows = [r for r in stored if r.get("status") == "RESOLVED"]
+    assert len(resolved_rows) == 1
+    assert "VERIFIED_CORRECT" in resolved_rows[0]["resolution"]
+
+
+def test_t10_reconcile_keeps_unverified_and_ledger_failure(monkeypatch, tmp_path):
+    """T10: items without decisive verdict stay OPEN; ledger import failure
+    keeps claims (never silently drops — F2 fail-visible)."""
+    import chron.chron_attention_debt as ad
+    import chron.chron_prediction as cp
+
+    monkeypatch.setattr(ad, "DEBT_FILE", tmp_path / "attention_debt.jsonl")
+    monkeypatch.setattr(cp, "decided_ids", lambda: set())
+    monkeypatch.setattr(cp, "load_verifications", lambda: {})
+    monkeypatch.setattr(ad, "collect_overdue_predictions", lambda: [])
+    monkeypatch.setattr(ad, "collect_unresolved_high_events", lambda: [])
+
+    keep = create_debt_item(source="overdue_prediction", ref_id="pred-still-waiting",
+                            description="genuine debt", consequence="MEDIUM")
+    ad._append_debt(keep)
+    result = ad.collect_current_debt()
+    assert any(i.get("ref_id") == "pred-still-waiting" for i in result)
+
+    # ledger unavailable → claims preserved
+    def _boom():
+        raise RuntimeError("ledger down")
+    monkeypatch.setattr(cp, "decided_ids", _boom)
+    result2 = ad.collect_current_debt()
+    assert any(i.get("ref_id") == "pred-still-waiting" for i in result2)
