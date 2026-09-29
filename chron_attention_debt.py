@@ -130,14 +130,21 @@ def _reconcile_open_items(open_items: list[dict]) -> list[dict]:
     debt that aged forever (2026-09-28: AD=60.3 driven by 8 items already
     VERIFIED in the calibration ledger, growth 2.5/day on resolved claims).
 
-    Only decisive verdicts (CORRECT/INCORRECT via ``decided_ids``) resolve —
-    UNVERIFIABLE means awaiting evidence, which is legitimate aging debt.
+    Decisive verdicts (CORRECT/INCORRECT) resolve debt, and so does an EXPLICIT
+    closure (``chron_resolve_unverifiable`` → resolution_class CLOSED_UNTESTABLE):
+    a shut measurement window is a finished arrow, not a late one. A verifier's
+    plain UNVERIFIABLE / "no evidence yet" record means the evidence is late —
+    that is legitimate aging debt and must keep aging.
     Resolution is append-only via ``_resolve_debt`` (history preserved).
     """
     try:
-        from chron.chron_prediction import decided_ids, load_verifications
+        from chron.chron_prediction import (
+            _canonical_verdict,
+            load_verifications,
+            resolved_ids,
+        )
 
-        decided = decided_ids()
+        finished = resolved_ids()
         verifs = load_verifications()
     except Exception:
         return open_items  # ledger unavailable → keep claims, never silently drop (F2)
@@ -145,8 +152,8 @@ def _reconcile_open_items(open_items: list[dict]) -> list[dict]:
     for item in open_items:
         ref = item.get("ref_id")
         did = item.get("debt_id")
-        if did and item.get("source") == "overdue_prediction" and ref in decided:
-            verdict = (verifs.get(ref) or {}).get("verdict", "DECISIVE")
+        if did and item.get("source") == "overdue_prediction" and ref in finished:
+            verdict = _canonical_verdict(verifs.get(ref) or {}) or "RESOLVED"
             resolved = _resolve_debt(
                 did,
                 f"auto-reconciled: verification ledger holds {verdict} — prediction no longer awaiting",

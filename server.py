@@ -45,6 +45,8 @@ from chron.chron_prediction import (
     generate_from_chron_events,
     _canonical_verdict,
     _DECISIVE,
+    VERDICT_UNVERIFIABLE,
+    VERDICT_CLOSED_UNTESTABLE,
 )
 from chron.chron_verify import (
     run_verification,
@@ -1046,6 +1048,10 @@ def chron_resolve_unverifiable(
         "verification_id": f"vrf-{prediction_id}-UNVERIFIABLE",
         "prediction_id": prediction_id,
         "verdict": "UNVERIFIABLE",
+        # Distinct from a verifier's "no evidence yet": this is a decision that the
+        # measurement window is shut. Without this class the closure read identically
+        # to lateness, so the arrow never left the active set.
+        "resolution_class": "CLOSED_UNTESTABLE",
         "brier_score": None,
         "observed_outcome": f"UNVERIFIABLE: {reason}",
         "verified_at": _now_iso(),
@@ -1057,8 +1063,13 @@ def chron_resolve_unverifiable(
     ep = verify_from_result(pred, f"UNVERIFIABLE: {reason}", None, "UNVERIFIABLE")
     store.append(ep)
 
+    # OBSERVE the outcome instead of asserting it (APEX: Outcome > intention).
+    still_active = any(p.get("prediction_id") == prediction_id for p in get_active())
     return {
         "status": "UNVERIFIABLE",
+        "resolution_class": "CLOSED_UNTESTABLE",
+        "arrow": "CLOSED_UNSCORED",
+        "still_active": still_active,
         "prediction_id": prediction_id,
         "reason": reason,
         "claim": pred.get("claim"),
@@ -1361,6 +1372,11 @@ async def health(request):
     active = get_active()
     ledger = get_verified(limit=10000)
     decisive = [v for v in ledger if _canonical_verdict(v) in _DECISIVE]
+    # Counted from the ledger, not from calibration: an explicitly closed-untestable
+    # arrow is finished-but-unscored and must never be conflated with a verifier's
+    # "evidence is late". Reading calibration here reported 0 for closures that existed.
+    awaiting = [v for v in ledger if _canonical_verdict(v) == VERDICT_UNVERIFIABLE]
+    closed_untestable = [v for v in ledger if _canonical_verdict(v) == VERDICT_CLOSED_UNTESTABLE]
 
     ad_summary = get_ad_summary()
 
@@ -1374,7 +1390,9 @@ async def health(request):
                 "total": len(preds),
                 "active": len(active),
                 "verified": len(decisive),
-                "unverifiable": calibration.get("unverifiable", 0),
+                "unverifiable_awaiting_evidence": len(awaiting),
+                "closed_untestable": len(closed_untestable),
+                "unverifiable": len(awaiting),
                 "orphan_verification_records": calibration.get("orphan_records", 0),
             },
             "calibration": {

@@ -213,10 +213,16 @@ VERIFICATION_LOG = Path("/root/chron/data/verification_log.jsonl")
 VERDICT_CORRECT = "VERIFIED_CORRECT"
 VERDICT_INCORRECT = "VERIFIED_INCORRECT"
 VERDICT_UNVERIFIABLE = "UNVERIFIABLE"
+# "no evidence yet" and "this window is closed and will never be scored" are two
+# different transitions. Collapsed into one token, a deliberately closed arrow kept
+# re-offering itself to verify_due and kept aging attention debt forever.
+VERDICT_CLOSED_UNTESTABLE = "UNVERIFIABLE_CLOSED"
 VERDICT_VOID = "VOID"
 V_ACTIVE = "ACTIVE"
 
 _DECISIVE = (VERDICT_CORRECT, VERDICT_INCORRECT)
+# The arrow is FINISHED: scored, or explicitly closed as untestable.
+_RESOLVED = _DECISIVE + (VERDICT_CLOSED_UNTESTABLE,)
 
 
 def _canonical_verdict(rec: dict) -> str:
@@ -237,6 +243,14 @@ def _canonical_verdict(rec: dict) -> str:
         return VERDICT_INCORRECT
     if raw in (VERDICT_VOID, "VOIDED", "RETRACTED"):
         return VERDICT_VOID
+    # An explicit closure outranks the generic UNVERIFIABLE spelling: it carries the
+    # subject's or an agent's decision that the window is shut, not that evidence is late.
+    if rec.get("resolution_class") == "CLOSED_UNTESTABLE" or (
+        rec.get("verified_by") == "chron_resolve_unverifiable"
+    ):
+        return VERDICT_CLOSED_UNTESTABLE
+    if raw == VERDICT_CLOSED_UNTESTABLE:
+        return VERDICT_CLOSED_UNTESTABLE
     if raw in (VERDICT_UNVERIFIABLE, "PENDING", "NOT_YET_DUE", "EXPIRED_UNVERIFIED"):
         return VERDICT_UNVERIFIABLE
     return VERDICT_UNVERIFIABLE
@@ -267,7 +281,11 @@ def load_verifications() -> dict[str, dict]:
 
 
 def decided_ids() -> set[str]:
-    """Prediction IDs that carry a decisive (CORRECT/INCORRECT) verdict."""
+    """Prediction IDs that carry a decisive (CORRECT/INCORRECT) verdict.
+
+    Calibration counts ONLY these. An explicitly closed-untestable arrow is
+    finished but unscored, so it must never enter the Brier/accuracy denominator.
+    """
     return {
         pid
         for pid, rec in load_verifications().items()
@@ -275,18 +293,37 @@ def decided_ids() -> set[str]:
     }
 
 
+def resolved_ids() -> set[str]:
+    """Prediction IDs whose arrow is FINISHED — scored, or closed as untestable.
+
+    ``chron_resolve_unverifiable`` promises "removed from the active set (stopping
+    attention debt accumulation)". Before this split, a closure wrote a ledger record
+    that read identically to "evidence is late", so the prediction stayed active:
+    verify_due re-offered it every night and attention debt aged it forever, while
+    calibration correctly refused to score it. Closing is a decision; lateness is not.
+    A VOID record does NOT resolve — retraction re-opens the arrow.
+    """
+    return {
+        pid
+        for pid, rec in load_verifications().items()
+        if _canonical_verdict(rec) in _RESOLVED
+    }
+
+
 def get_active() -> list[dict]:
-    """Get predictions still awaiting a decisive verdict.
+    """Get predictions still awaiting the end of their arrow.
 
     A prediction with a CORRECT/INCORRECT verification is no longer active,
     even though its immutable birth record still says ``status: ACTIVE``.
-    An UNVERIFIABLE record does NOT resolve a prediction — it stays active.
+    An explicitly CLOSED-UNTESTABLE record also ends the arrow (unscored).
+    A plain UNVERIFIABLE record from a verifier attempt means "evidence is
+    late", which legitimately keeps the prediction active.
     """
-    decided = decided_ids()
+    resolved = resolved_ids()
     return [
         p
         for p in load_predictions()
-        if p["status"] == V_ACTIVE and p["prediction_id"] not in decided
+        if p["status"] == V_ACTIVE and p["prediction_id"] not in resolved
     ]
 
 

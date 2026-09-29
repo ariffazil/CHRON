@@ -183,6 +183,7 @@ def test_t9_reconcile_resolves_verified_phantom_debt(monkeypatch, tmp_path):
 
     monkeypatch.setattr(ad, "DEBT_FILE", tmp_path / "attention_debt.jsonl")
     monkeypatch.setattr(cp, "decided_ids", lambda: {"pred-phantom"})
+    monkeypatch.setattr(cp, "resolved_ids", lambda: {"pred-phantom"})
     monkeypatch.setattr(cp, "load_verifications", lambda: {
         "pred-phantom": {"verdict": "VERIFIED_CORRECT", "verified_at": "2026-09-26T00:00:00Z"}
     })
@@ -214,6 +215,7 @@ def test_t10_reconcile_keeps_unverified_and_ledger_failure(monkeypatch, tmp_path
 
     monkeypatch.setattr(ad, "DEBT_FILE", tmp_path / "attention_debt.jsonl")
     monkeypatch.setattr(cp, "decided_ids", lambda: set())
+    monkeypatch.setattr(cp, "resolved_ids", lambda: set())
     monkeypatch.setattr(cp, "load_verifications", lambda: {})
     monkeypatch.setattr(ad, "collect_overdue_predictions", lambda: [])
     monkeypatch.setattr(ad, "collect_unresolved_high_events", lambda: [])
@@ -227,6 +229,38 @@ def test_t10_reconcile_keeps_unverified_and_ledger_failure(monkeypatch, tmp_path
     # ledger unavailable → claims preserved
     def _boom():
         raise RuntimeError("ledger down")
-    monkeypatch.setattr(cp, "decided_ids", _boom)
+    monkeypatch.setattr(cp, "resolved_ids", _boom)
     result2 = ad.collect_current_debt()
     assert any(i.get("ref_id") == "pred-still-waiting" for i in result2)
+
+
+def test_t11_explicit_closure_stops_aging_lateness_keeps_aging(monkeypatch, tmp_path):
+    """A shut measurement window is a finished arrow; late evidence is not.
+
+    chron_resolve_unverifiable promises "removed from the active set (stopping
+    attention debt accumulation)". Before the CLOSED_UNTESTABLE split a closure
+    wrote a ledger row that read exactly like a verifier's "no evidence yet", so
+    the debt item aged forever while calibration correctly refused to score it.
+    """
+    import chron.chron_attention_debt as ad
+    import chron.chron_prediction as cp
+
+    monkeypatch.setattr(ad, "DEBT_FILE", tmp_path / "attention_debt.jsonl")
+    monkeypatch.setattr(cp, "load_verifications", lambda: {
+        "pred-closed": {"verdict": "UNVERIFIABLE", "resolution_class": "CLOSED_UNTESTABLE",
+                        "verified_at": "2026-09-29T00:00:00Z"},
+        "pred-late": {"verdict": "UNVERIFIABLE", "verified_by": "verify_due",
+                      "verified_at": "2026-09-29T00:00:00Z"},
+    })
+    monkeypatch.setattr(ad, "collect_overdue_predictions", lambda: [])
+    monkeypatch.setattr(ad, "collect_unresolved_high_events", lambda: [])
+
+    # resolved_ids comes from the real implementation — only the ledger is stubbed.
+    for pid, desc in (("pred-closed", "closed window"), ("pred-late", "late evidence")):
+        ad._append_debt(create_debt_item(source="overdue_prediction", ref_id=pid,
+                                         description=desc, consequence="MEDIUM"))
+
+    result = ad.collect_current_debt()
+    refs = {i.get("ref_id") for i in result}
+    assert "pred-closed" not in refs, "explicit closure must stop debt aging"
+    assert "pred-late" in refs, "late evidence must keep aging (legitimate debt)"
