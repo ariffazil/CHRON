@@ -96,8 +96,13 @@ def observer_of(episode: Any, include_subkey: bool = False) -> str:
 
     Order of authority:
       1. claims[].asserted_by — the slot that literally means "who asserted this"
-      2. principal — repurposed by the bridges; used only when it resolves to a
+      2. author
+      3. created_by / actor_id — the authorship fields CHRON and arifFlow actually write
+      4. principal — repurposed by the bridges; used only when it resolves to a
          registered agent
+    A registered lane rolls up: '333-agi/fi-003' is the lane root '333-agi', because the
+    stated rule is that a lane root and its sub-vehicles count as ONE actor. Previously only
+    two sub-vehicles were enumerated by hand, so an unlisted one silently lost its identity.
     Anything else returns AMBIGUOUS_SEMANTICS (a value whose field means something else)
     or UNATTRIBUTED (no usable identity).
     """
@@ -114,6 +119,11 @@ def observer_of(episode: Any, include_subkey: bool = False) -> str:
             if include_subkey and "/" in key:
                 return key
             return KNOWN_AGENTS[key]
+        root, sub = _lane_root(key)
+        if root in KNOWN_AGENTS:
+            if include_subkey and sub:
+                return key
+            return KNOWN_AGENTS[root]
 
     # Nothing resolved. Distinguish "the field means something else" from "no identity".
     principal = _normalize(episode.get("principal"))
@@ -129,6 +139,14 @@ def _candidates(episode: dict) -> list[str]:
             out.append(str(claim["asserted_by"]))
     if episode.get("author"):
         out.append(str(episode["author"]))
+    # created_by (CHRON predictions) and actor_id (arifFlow receipts) are the ONLY authorship
+    # fields those two stores actually populate. Until 2026-10-01 this resolver read neither, so
+    # every real row fell to UNATTRIBUTED/AMBIGUOUS however good the identity was: the lookup was
+    # blind to the field holding the answer. Placed after the explicit authorship slots
+    # (asserted_by, author) and before principal, which is a privacy scope, not authorship.
+    for field in ("created_by", "actor_id", "observer", "steward"):
+        if episode.get(field):
+            out.append(str(episode[field]))
     if episode.get("principal"):
         out.append(str(episode["principal"]))
     return out
