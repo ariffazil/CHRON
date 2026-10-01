@@ -31,6 +31,21 @@ from chron.chron_attention_debt import (
 )
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ad_snapshot_store(monkeypatch, tmp_path):
+    """T1–T11 appended to the PRODUCTION trend store on every run (measured:
+    /root/chron/data/ad_snapshots.jsonl 17,113 → 17,118 from a single 11-test pass),
+    which poisons `_compute_growth_rate()` — it reads only the oldest and newest
+    rows, so a test artifact becomes the estate's latest observation of attention
+    debt. Redirect the store for every test in this module."""
+    import chron.chron_attention_debt as ad
+
+    monkeypatch.setattr(ad, "AD_SNAPSHOT_FILE", tmp_path / "ad_snapshots.jsonl")
+
+
 def test_t1_debt_item_creation():
     """T1: Debt item has correct fields and deterministic ID."""
     item = create_debt_item(
@@ -264,3 +279,148 @@ def test_t11_explicit_closure_stops_aging_lateness_keeps_aging(monkeypatch, tmp_
     refs = {i.get("ref_id") for i in result}
     assert "pred-closed" not in refs, "explicit closure must stop debt aging"
     assert "pred-late" in refs, "late evidence must keep aging (legitimate debt)"
+
+
+# ─────────────── unresolved_event class (T12–T17) ───────────────
+# The phantom-debt guard (d9f4e16 / 9c34f51) is source-scoped to
+# ``overdue_prediction``, so ``unresolved_event`` rows can never be discharged:
+# an event id is not a prediction id and no event→prediction join existed.
+# The join already exists in the data — predictions minted from events carry
+# ``source: "chron_events"`` + ``source_id: <event.id>`` — it was simply never
+# consulted. Measured consequence: ad-3a2c111e (event mss-interest-registered-2026-09-29)
+# aged at weight 3.0/day against a prediction scored VERIFIED_CORRECT on
+# 2026-09-29, and was the estate's ONLY remaining OPEN contradiction
+# (contradiction_accumulator counts_by_state OPEN: 1, 2026-10-01T00:15:02Z).
+
+def _ev_pred(pid, source_id, status="ACTIVE"):
+    return {
+        "prediction_id": pid, "claim": f"claim {pid}", "confidence": 0.7,
+        "verify_at": "2026-09-20T00:00:00+08:00", "status": status,
+        "source": "chron_events", "source_id": source_id,
+        "created_at": "2026-09-18T00:00:00Z",
+    }
+
+
+def _ev_verif(pid, verdict="VERIFIED_CORRECT"):
+    return {
+        "verification_id": f"verif-{pid}", "prediction_id": pid, "verdict": verdict,
+        "observed_outcome": "scratch outcome", "error_type": "NONE",
+        "brier_score": 0.09, "verified_at": "2026-09-21T00:00:00Z",
+    }
+
+
+def _event_store(tmp_path, monkeypatch, predictions, verifications, events):
+    import chron.chron_attention_debt as ad
+    import chron.chron_prediction as cp
+
+    pred_f = tmp_path / "predictions.jsonl"
+    pred_f.write_text("\n".join(json.dumps(p) for p in predictions) + ("\n" if predictions else ""))
+    ver_f = tmp_path / "verification_log.jsonl"
+    ver_f.write_text("\n".join(json.dumps(v) for v in verifications) + ("\n" if verifications else ""))
+    ev_f = tmp_path / "chron_events.json"
+    ev_f.write_text(json.dumps({"events": events}))
+
+    monkeypatch.setattr(ad, "DEBT_FILE", tmp_path / "attention_debt.jsonl")
+    monkeypatch.setattr(ad, "AD_SNAPSHOT_FILE", tmp_path / "ad_snapshots.jsonl")
+    monkeypatch.setattr(ad, "EVENTS_FILE", ev_f)
+    monkeypatch.setattr(cp, "PREDICTIONS_FILE", pred_f)
+    monkeypatch.setattr(cp, "VERIFICATION_LOG", ver_f)
+    monkeypatch.setattr(cp, "VERIFICATION_ATTEMPTS", tmp_path / "verification_attempts.jsonl")
+    return ad
+
+
+def _event_high(event_id, target_date="2026-09-29"):
+    return {"id": event_id, "title": f"HIGH event {event_id}", "target_date": target_date,
+            "consequence": "HIGH", "kind": "PERSONAL_SAFE", "confidence": "CONFIRMED"}
+
+
+def test_t12_event_debt_healed_when_bound_prediction_verified(monkeypatch, tmp_path):
+    """T12: persisted OPEN unresolved_event whose bound prediction now holds a
+    decisive verdict is auto-resolved, append-only, naming the discharged arrow."""
+    ad = _event_store(tmp_path, monkeypatch,
+                      predictions=[_ev_pred("pred-mss", "ev-mss")],
+                      verifications=[_ev_verif("pred-mss")],
+                      events=[_event_high("ev-mss")])
+    ad._append_debt(create_debt_item(
+        source="unresolved_event", ref_id="ev-mss",
+        description="HIGH event past target", consequence="HIGH"))
+
+    result = ad.collect_current_debt()
+
+    assert all(i.get("ref_id") != "ev-mss" for i in result), "event phantom still counted OPEN"
+    rows = [r for r in ad._load_all_debt() if r.get("status") == "RESOLVED"]
+    assert len(rows) == 1
+    assert "pred-mss" in rows[0]["resolution"], "resolution must name the discharged arrow"
+
+
+def test_t13_event_debt_ages_while_arrow_open(monkeypatch, tmp_path):
+    """T13: bound prediction with NO verdict → the event is genuinely awaiting
+    consequence. Debt must keep aging (no over-clearing)."""
+    ad = _event_store(tmp_path, monkeypatch,
+                      predictions=[_ev_pred("pred-open", "ev-open")],
+                      verifications=[],
+                      events=[_event_high("ev-open")])
+    ad._append_debt(create_debt_item(
+        source="unresolved_event", ref_id="ev-open",
+        description="awaiting reality", consequence="HIGH"))
+
+    result = ad.collect_current_debt()
+    assert any(i.get("ref_id") == "ev-open" for i in result)
+
+
+def test_t14_event_with_no_prediction_stays_open(monkeypatch, tmp_path):
+    """T14: a HIGH past-target event that spawned no prediction at all is the
+    strongest true positive ("nobody ever looked") — absence of an arrow is NOT
+    discharge."""
+    ad = _event_store(tmp_path, monkeypatch, predictions=[], verifications=[],
+                      events=[_event_high("ev-nobody")])
+    ad._append_debt(create_debt_item(
+        source="unresolved_event", ref_id="ev-nobody",
+        description="no measurement arrow exists", consequence="HIGH"))
+
+    result = ad.collect_current_debt()
+    assert any(i.get("ref_id") == "ev-nobody" for i in result)
+
+
+def test_t15_partially_discharged_event_stays_open(monkeypatch, tmp_path):
+    """T15: two arrows bound to one event, only one verified → event still owed."""
+    ad = _event_store(tmp_path, monkeypatch,
+                      predictions=[_ev_pred("pred-done", "ev-two"), _ev_pred("pred-pending", "ev-two")],
+                      verifications=[_ev_verif("pred-done")],
+                      events=[_event_high("ev-two")])
+    ad._append_debt(create_debt_item(
+        source="unresolved_event", ref_id="ev-two", description="half discharged", consequence="HIGH"))
+
+    result = ad.collect_current_debt()
+    assert any(i.get("ref_id") == "ev-two" for i in result)
+
+
+def test_t16_collector_does_not_remint_discharged_event(monkeypatch, tmp_path):
+    """T16: no resurrection loop. debt_id is deterministic from (source, ref_id), so a
+    healed row that the collector re-mints would flip-flop OPEN/RESOLVED daily and
+    double the ledger forever."""
+    ad = _event_store(tmp_path, monkeypatch,
+                      predictions=[_ev_pred("pred-mss", "ev-mss")],
+                      verifications=[_ev_verif("pred-mss")],
+                      events=[_event_high("ev-mss")])
+    assert ad.collect_unresolved_high_events() == [], "discharged event re-minted as fresh debt"
+
+
+def test_t17_event_reconcile_fails_safe_when_ledger_unreadable(monkeypatch, tmp_path):
+    """T17: if the birth store cannot be read, an unresolved_event claim is KEPT
+    (fail-visible), never silently dropped — the guard may not manufacture silence."""
+    import chron.chron_prediction as cp
+    ad = _event_store(tmp_path, monkeypatch,
+                      predictions=[_ev_pred("pred-mss", "ev-mss")],
+                      verifications=[_ev_verif("pred-mss")],
+                      events=[_event_high("ev-mss")])
+
+    def _boom():
+        raise OSError("ledger unreadable")
+
+    monkeypatch.setattr(cp, "load_predictions", _boom)
+    ad._append_debt(create_debt_item(
+        source="unresolved_event", ref_id="ev-mss", description="keep me", consequence="HIGH"))
+
+    result = ad.collect_current_debt()
+    assert any(i.get("ref_id") == "ev-mss" for i in result), "debt vanished because the join could not be read"

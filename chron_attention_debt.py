@@ -27,11 +27,62 @@ from pathlib import Path
 from typing import Optional
 
 DEBT_FILE = Path("/root/chron/data/attention_debt.jsonl")
+EVENTS_FILE = Path("/root/AAA/scripts/chron_events.json")
 
 CONSEQUENCE_WEIGHT = {"HIGH": 3.0, "MEDIUM": 2.0, "LOW": 1.0}
 DEFAULT_WEIGHT = 2.0
 
 _now_iso = lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+# ───────────────────── EVENT → ARROW JOIN ─────────────────────
+
+
+def _event_arrow_index() -> dict[str, list[str]]:
+    """Map event id -> prediction ids born from that event.
+
+    The join already exists in the data: predictions generated from chron_events
+    carry ``source: "chron_events"`` and ``source_id: <event.id>``. Debt aged on
+    the event without ever consulting it, so an event whose measurement arrow
+    reality had already answered stayed OPEN forever (ad-3a2c111e).
+
+    Propagates any read failure — a caller may not treat "cannot read" as
+    "discharged".
+    """
+    from chron.chron_prediction import load_predictions
+
+    index: dict[str, list[str]] = {}
+    for pred in load_predictions():
+        if pred.get("source") != "chron_events":
+            continue
+        event_id = pred.get("source_id")
+        pred_id = pred.get("prediction_id")
+        if event_id and pred_id:
+            index.setdefault(event_id, []).append(pred_id)
+    return index
+
+
+def _discharged_arrows(event_id: Optional[str]) -> list[str]:
+    """Prediction ids closed for this event — and only when EVERY bound arrow is closed.
+
+    ``all``, not ``any``: an event with three arrows and one verdict is still owed
+    two. And absence of any arrow is NOT discharge — a HIGH past-target event that
+    nobody ever wrote a prediction about is the strongest true positive this
+    collector produces.
+
+    Reuses ``resolved_ids()`` rather than a parallel notion of "closed", so an
+    explicit CLOSED_UNTESTABLE discharge here means exactly what it means on the
+    prediction side: a finished arrow, not late evidence.
+    """
+    from chron.chron_prediction import resolved_ids
+
+    if not event_id:
+        return []
+    arrows = _event_arrow_index().get(event_id) or []
+    if not arrows:
+        return []
+    finished = resolved_ids()
+    return arrows if all(a in finished for a in arrows) else []
 
 
 # ───────────────────────── DEBT ITEM ─────────────────────────
@@ -152,7 +203,8 @@ def _reconcile_open_items(open_items: list[dict]) -> list[dict]:
     for item in open_items:
         ref = item.get("ref_id")
         did = item.get("debt_id")
-        if did and item.get("source") == "overdue_prediction" and ref in finished:
+        src = item.get("source")
+        if did and src == "overdue_prediction" and ref in finished:
             verdict = _canonical_verdict(verifs.get(ref) or {}) or "RESOLVED"
             resolved = _resolve_debt(
                 did,
@@ -160,6 +212,21 @@ def _reconcile_open_items(open_items: list[dict]) -> list[dict]:
             )
             if resolved:
                 continue
+        if did and src == "unresolved_event":
+            # An event id is not a prediction id, so membership in `finished` can
+            # never match directly — the discharge runs through the arrow join.
+            try:
+                closed = _discharged_arrows(ref)
+            except Exception:
+                closed = []  # unreadable birth store → keep the claim (F2 fail-visible)
+            if closed:
+                resolved = _resolve_debt(
+                    did,
+                    f"auto-reconciled: every prediction arrow bound to event {ref} "
+                    f"is closed ({', '.join(closed)})",
+                )
+                if resolved:
+                    continue
         still_open.append(item)
     return still_open
 
@@ -200,8 +267,14 @@ def collect_overdue_predictions() -> list[dict]:
 
 
 def collect_unresolved_high_events() -> list[dict]:
-    """Collect HIGH-consequence events with no outcome recorded."""
-    events_path = Path("/root/AAA/scripts/chron_events.json")
+    """Collect HIGH-consequence events with no outcome recorded.
+
+    Events whose bound prediction arrows are ALL closed are discharged and mint no
+    debt: ``debt_id`` is deterministic from (source, ref_id), so re-minting an event
+    the reconciler has just closed would flip-flop the same id OPEN/RESOLVED on every
+    run and grow the append-only ledger forever.
+    """
+    events_path = EVENTS_FILE
     if not events_path.exists():
         return []
 
@@ -226,6 +299,12 @@ def collect_unresolved_high_events() -> list[dict]:
         # Only flag events whose target date has passed
         if target > now:
             continue
+
+        try:
+            if _discharged_arrows(event.get("id")):
+                continue
+        except Exception:
+            pass  # cannot prove discharge → keep minting the claim, never drop it
 
         age_days = (now - target).total_seconds() / 86400
         items.append(
