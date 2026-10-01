@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from chron import chron_prediction
+
 CHRON_DATA = Path("/root/chron/data")
 HERMES_CHRON = Path("/root/.hermes/cron/state/chron_personal")
 CARRY_FORWARD = Path("/root/.local/share/arifos/carry_forward.json")
@@ -52,24 +54,33 @@ def generate_briefing() -> dict[str, Any]:
     """Generate the chron_briefing object from live CHRON data."""
     now = datetime.now(timezone.utc)
 
-    # Predictions — check both CHRON data dir and Hermes chron_personal
-    predictions = _load_jsonl(CHRON_DATA / "predictions.jsonl")
-    if not predictions:
-        hermes_preds = _load_json(HERMES_CHRON / "predictions.json")
-        if isinstance(hermes_preds, list):
-            predictions = hermes_preds
-        elif isinstance(hermes_preds, dict) and "predictions" in hermes_preds:
-            predictions = hermes_preds["predictions"]
-        elif isinstance(hermes_preds, dict) and hermes_preds:
-            predictions = [hermes_preds]
-    active = [p for p in predictions if p.get("status", "").upper() == "ACTIVE"]
-    due = [
-        p for p in active
-        if p.get("verify_at") and p["verify_at"] <= now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    ]
-    upcoming = [
-        p for p in active
-        if p.get("verify_at") and p["verify_at"] > now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Predictions — temporal state is DERIVED here, never recomputed.
+    # Filtering the birth store on ``status == ACTIVE`` re-reported closed arrows as
+    # owed (the birth record always reads ACTIVE — that is the immutability invariant,
+    # not the arrow's state), and comparing offset-spelled ``verify_at`` against a
+    # Z-suffixed ``now`` as strings misjudged any horizon inside the UTC-offset band.
+    # get_active()/get_due() are the same join chron_store_stats() publishes, so the
+    # surface agents inherit at boot can no longer disagree with the surface the
+    # verifier acts on.
+    active = chron_prediction.get_active()
+    due = chron_prediction.get_due()
+    due_ids = {p.get("prediction_id") for p in due}
+    upcoming = [p for p in active if p.get("prediction_id") not in due_ids]
+
+    # Legacy second store (Hermes chron_personal mirror). Reported beside the census,
+    # never merged into it: its births cannot resolve through the canonical verdict
+    # join, so folding them into ``active`` aged them as permanently open. 7 such rows
+    # exist at patch time and would otherwise have been dropped silently.
+    legacy_mirror = _load_json(HERMES_CHRON / "predictions.json")
+    legacy_rows = legacy_mirror.get("predictions", []) if isinstance(legacy_mirror, dict) else []
+    canonical_births = {p.get("prediction_id") for p in chron_prediction.load_predictions()}
+    legacy_active = [
+        p for p in legacy_rows
+        if p.get("prediction_id") not in canonical_births
+        # The mirror spells its temporal state ``state`` (with state_original and
+        # supersedes/superseded_by edges); reading ``status`` here returns a silent
+        # zero, which is the same dead-field defect this patch removes above.
+        and str(p.get("state") or p.get("status") or "").upper() == "ACTIVE"
     ]
 
     # Lessons
@@ -109,11 +120,19 @@ def generate_briefing() -> dict[str, Any]:
                 }
                 for p in upcoming[:3]
             ],
+            # Born in the legacy Hermes mirror and unresolvable by the canonical
+            # verdict join. Held out of active_count on purpose, but made visible so
+            # the gap reads as a known second store rather than as "no data".
+            "legacy_store_active": len(legacy_active),
         },
         "calibration": {
             "total": calibration.get("total", 0),
             "correct": calibration.get("correct", 0),
-            "brier": calibration.get("brier_score"),
+            "accuracy": calibration.get("accuracy"),
+            # calibration.json publishes ``mean_brier``; ``brier_score`` was a dead
+            # read that made this field silently null in every briefing.
+            "brier": calibration.get("mean_brier", calibration.get("brier_score")),
+            "effective_n": calibration.get("effective_n"),
         },
         "recent_lessons_count": len(lessons),
         "recent_lessons": [
