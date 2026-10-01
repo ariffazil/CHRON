@@ -220,10 +220,17 @@ def _reconcile_open_items(open_items: list[dict]) -> list[dict]:
             except Exception:
                 closed = []  # unreadable birth store → keep the claim (F2 fail-visible)
             if closed:
+                # resolved_ids() membership guarantees a canonical verdict here, so
+                # each arrow is cited with the state that actually finished it —
+                # VERIFIED_CORRECT and UNVERIFIABLE_CLOSED are different claims and
+                # must not read the same in the debt ledger.
+                cites = ", ".join(
+                    f"{a}={_canonical_verdict(verifs.get(a) or {})}" for a in closed
+                )
                 resolved = _resolve_debt(
                     did,
                     f"auto-reconciled: every prediction arrow bound to event {ref} "
-                    f"is closed ({', '.join(closed)})",
+                    f"is closed ({cites})",
                 )
                 if resolved:
                     continue

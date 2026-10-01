@@ -301,11 +301,12 @@ def _ev_pred(pid, source_id, status="ACTIVE"):
     }
 
 
-def _ev_verif(pid, verdict="VERIFIED_CORRECT"):
+def _ev_verif(pid, verdict="VERIFIED_CORRECT", **extra):
     return {
         "verification_id": f"verif-{pid}", "prediction_id": pid, "verdict": verdict,
         "observed_outcome": "scratch outcome", "error_type": "NONE",
         "brier_score": 0.09, "verified_at": "2026-09-21T00:00:00Z",
+        **extra,
     }
 
 
@@ -424,3 +425,46 @@ def test_t17_event_reconcile_fails_safe_when_ledger_unreadable(monkeypatch, tmp_
 
     result = ad.collect_current_debt()
     assert any(i.get("ref_id") == "ev-mss" for i in result), "debt vanished because the join could not be read"
+
+
+def test_t18_discharge_reason_cites_arrow_verdict(monkeypatch, tmp_path):
+    """T18: an event discharge must be self-evidencing. Naming the arrow ids alone
+    ("is closed") sends the reader back into the verification ledger to learn WHY,
+    and collapses a scored verdict into a bare boolean transition (state-transition
+    law). pred-b0f6c81107e2 carries two rows — UNVERIFIABLE then VERIFIED_CORRECT —
+    so the verdict spelling is exactly the datum the resolution must carry."""
+    ad = _event_store(tmp_path, monkeypatch,
+                      predictions=[_ev_pred("pred-mss", "ev-mss")],
+                      verifications=[_ev_verif("pred-mss")],
+                      events=[_event_high("ev-mss")])
+    ad._append_debt(create_debt_item(
+        source="unresolved_event", ref_id="ev-mss",
+        description="HIGH event past target", consequence="HIGH"))
+
+    ad.collect_current_debt()
+    rows = [r for r in ad._load_all_debt() if r.get("status") == "RESOLVED"]
+    assert len(rows) == 1
+    resolution = rows[0]["resolution"]
+    assert "pred-mss" in resolution, resolution
+    assert "VERIFIED_CORRECT" in resolution, f"verdict missing from discharge: {resolution}"
+
+
+def test_t19_shut_window_discharge_names_its_own_state(monkeypatch, tmp_path):
+    """T19: an arrow closed as CLOSED_UNTESTABLE is FINISHED but not CORRECT. The
+    reason must read UNVERIFIABLE_CLOSED — a shut measurement window may never be
+    dressed up as a hit in the debt ledger."""
+    ad = _event_store(tmp_path, monkeypatch,
+                      predictions=[_ev_pred("pred-shut", "ev-shut")],
+                      verifications=[_ev_verif("pred-shut", verdict="UNVERIFIABLE",
+                                               resolution_class="CLOSED_UNTESTABLE")],
+                      events=[_event_high("ev-shut")])
+    ad._append_debt(create_debt_item(
+        source="unresolved_event", ref_id="ev-shut",
+        description="window shut by decision", consequence="HIGH"))
+
+    ad.collect_current_debt()
+    rows = [r for r in ad._load_all_debt() if r.get("status") == "RESOLVED"]
+    assert len(rows) == 1, "closed-untestable arrow must still discharge the event"
+    resolution = rows[0]["resolution"]
+    assert "UNVERIFIABLE_CLOSED" in resolution, resolution
+    assert "VERIFIED_CORRECT" not in resolution, "shut window scored as a hit"
