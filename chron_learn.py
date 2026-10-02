@@ -94,6 +94,12 @@ _LESSON_TEXT = {
         "times) because the source was missing or unparseable. Fix the data lane "
         "before reading any accuracy figure from these outcomes."
     ),
+    "RANGE_STALE_AT_MINT": (
+        "Threshold/range claims on live-market subjects were minted without a "
+        "spot-check ({n} times): the range was stale before the clock started. "
+        "Spot-check the live price/level at creation, record it in "
+        "evidence_snapshot, and only then commit a range."
+    ),
     "AWAITING_EVIDENCE": (
         "VERIFIER-PIPELINE observation: {n} predictions passed their verify_at and "
         "no evidence was observed. Absence of evidence is not a miss — these stay "
@@ -112,7 +118,9 @@ VERIFIER_PIPELINE_CLASSES = ("DATA_ERROR", "AWAITING_EVIDENCE")
 def lesson_scope(error_type: str) -> str:
     """'verifier_pipeline' for verifier defects, else 'prediction_quality'."""
     et = str(error_type or "").strip().upper()
-    return "verifier_pipeline" if et in VERIFIER_PIPELINE_CLASSES else "prediction_quality"
+    return (
+        "verifier_pipeline" if et in VERIFIER_PIPELINE_CLASSES else "prediction_quality"
+    )
 
 
 def _now_iso() -> str:
@@ -192,7 +200,11 @@ def load_active_policies() -> list[dict]:
     external validation (chron_loop_close._evaluate_promotion), which is not
     implemented, so nothing has reached status POLICY.
     """
-    return [l for l in load_lessons() if l.get("status") == "POLICY" and is_actionable_lesson(l)]
+    return [
+        l
+        for l in load_lessons()
+        if l.get("status") == "POLICY" and is_actionable_lesson(l)
+    ]
 
 
 # ───────────────────────── LESSON EXTRACTION ─────────────────────────
@@ -299,9 +311,7 @@ def extract_lessons() -> list[dict]:
         # Blind lessons are now DIAGNOSTIC: retained and disclosed, never promoted.
         # The threshold that consumes this is MAX_BLIND_LESSON_SHARE in
         # chron.chron_prediction (via chron_learn.lesson_health).
-        actionable = (
-            error_type in INTERPRETABLE_ERROR_TYPES and mean_brier is not None
-        )
+        actionable = error_type in INTERPRETABLE_ERROR_TYPES and mean_brier is not None
         scope = lesson_scope(error_type)
         status = "CANDIDATE" if actionable else "DIAGNOSTIC"
         # Only a prediction-quality rule can be promoted: a verifier-pipeline
@@ -456,9 +466,7 @@ def supersede_lesson(
     the classifier's own blindness ("Investigate root cause"). The original row
     stays in the file as evidence; load_lessons() takes the later status.
     """
-    current = next(
-        (l for l in load_lessons() if l.get("lesson_id") == lesson_id), None
-    )
+    current = next((l for l in load_lessons() if l.get("lesson_id") == lesson_id), None)
     if current is None:
         return None
     row = {
@@ -501,7 +509,9 @@ def main() -> int:
         rows = load_insufficient()
         print(f"Unexplained outcomes (not lessons): {len(rows)}")
         for r in rows:
-            print(f"  [{r.get('state')}] class={r.get('error_type_seen')} n={r.get('recurrence')}")
+            print(
+                f"  [{r.get('state')}] class={r.get('error_type_seen')} n={r.get('recurrence')}"
+            )
             print(f"    {r.get('reason')}")
             print(f"    predictions: {r.get('prediction_ids')}")
     elif args and args[0] == "health":

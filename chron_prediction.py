@@ -743,6 +743,7 @@ INTERPRETABLE_ERROR_TYPES = (
     "MODEL_ERROR",
     "REGIME_CHANGE",
     "AWAITING_EVIDENCE",
+    "RANGE_STALE_AT_MINT",  # 2026-10-02: structural fallback class (sealed Brent lesson)
 )
 
 

@@ -73,3 +73,33 @@ def test_regex_gating_subject_required():
     """Range shape on a NON-market subject must not classify as range-stale."""
     p = _pred("deploy takes between 5 and 10 minutes")
     assert cp._classify_error(p) == "UNKNOWN"
+
+
+# ── Coupling contract (chron_learn.py L74: class-without-rule is classic drift) ──
+
+
+def test_range_stale_is_interpretable():
+    """Classifier output must be in INTERPRETABLE_ERROR_TYPES or lessons park it."""
+    assert "RANGE_STALE_AT_MINT" in cp.INTERPRETABLE_ERROR_TYPES
+
+
+def test_every_interpretable_type_has_lesson_text():
+    """INTERPRETABLE_ERROR_TYPES (chron_prediction) and _LESSON_TEXT keys
+    (chron_learn) must stay in lockstep — adding one without the other is the
+    documented drift that silently parks lessons as INSUFFICIENT_DATA."""
+    import importlib.util as _ilu
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _spec2 = _ilu.spec_from_file_location(
+        "chron_learn", _Path(__file__).resolve().parents[1] / "chron_learn.py"
+    )
+    assert _spec2 is not None and _spec2.loader is not None
+    cl = _ilu.module_from_spec(_spec2)
+    _sys.modules.setdefault("chron_learn", cl)
+    _spec2.loader.exec_module(cl)
+
+    missing = set(cp.INTERPRETABLE_ERROR_TYPES) - set(cl._LESSON_TEXT)
+    assert not missing, (
+        f"classes without lesson text (would park as INSUFFICIENT): {missing}"
+    )
