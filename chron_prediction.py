@@ -12,6 +12,7 @@ DITEMPA BUKAN DIBERI ⚒️
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -167,9 +168,7 @@ def create_prediction(
         # and no explicit human-witness audience is UNBOUND, not ACTIVE.
         # Cron cannot close a door that was never attached.
         "status": (
-            "ACTIVE"
-            if (extra.get("probe_id") or audience == "arif")
-            else "UNBOUND"
+            "ACTIVE" if (extra.get("probe_id") or audience == "arif") else "UNBOUND"
         ),
         "binding": extra.get("probe_id")
         or ("HUMAN_WITNESS" if audience == "arif" else "NO_MACHINE_PROBE"),
@@ -448,9 +447,8 @@ def get_verified(limit: int = 50, include_void: bool = False) -> list[dict]:
                 "observed_outcome": verif.get("observed_outcome"),
                 "brier_score": verif.get("brier_score"),
                 "error": verif.get("error"),
-                "error_type": verif.get("error_type") or (
-                    "UNKNOWN" if verdict == VERDICT_UNVERIFIABLE else "NONE"
-                ),
+                "error_type": verif.get("error_type")
+                or ("UNKNOWN" if verdict == VERDICT_UNVERIFIABLE else "NONE"),
             }
         )
 
@@ -518,7 +516,11 @@ def verify_prediction(
         error = 0.0 if correct else 1.0
         if correct:
             error_type = "NONE"
-        elif error_class and str(error_class).strip().upper() not in ("", "NONE", "UNKNOWN"):
+        elif error_class and str(error_class).strip().upper() not in (
+            "",
+            "NONE",
+            "UNKNOWN",
+        ):
             # Honour the class the evidence path measured.
             error_type = str(error_class).strip().upper()
         else:
@@ -546,12 +548,64 @@ def verify_prediction(
     }
 
 
+# ── Structural error taxonomy (2026-10-02) ─────────────────────────────────
+# Fallback classifier inputs are BIRTH-side fields only — the verification
+# path honours evidence-measured error_class BEFORE reaching here.
+#
+# RANGE_STALE_AT_MINT enforces the sealed Brent lesson (pred-a1210fe9e53c:
+# "Brent 65–75" minted while spot was 98.3 → "range predictions must be
+# spot-checked against live price at creation"). Naming the cause is what
+# makes the lesson promotable — UNKNOWN-class lessons are diagnostics by
+# design (chron_loop_close arrow_memory_to_policy).
+_RANGE_SUBJECT_RE = re.compile(
+    r"\b(brent|wti|crude|oil|gas|xau|gold|silver|usd|myr|sgd|ron\s?95|ron97|"
+    r"diesel|klci|nasdaq|snp|price|index|yield|rate)\b",
+    re.IGNORECASE,
+)
+_RANGE_CLAIM_RE = re.compile(
+    r"\b(between|under|below|above|at least|at most|no more than|"
+    r"no less than|within the range|range of)\b"
+    r"|[≤≥]\s?\d|\d\s?[-–]\s?\d",
+    re.IGNORECASE,
+)
+
+
 def _classify_error(prediction: dict) -> str:
-    """Classify why a prediction was wrong."""
-    if not prediction.get("assumptions"):
-        return "UNKNOWN"
-    # Default — more specific classification needs domain context
-    return "ASSUMPTION_ERROR"
+    """Classify why a prediction was wrong.
+
+    Priority (honoured upstream before this fallback is reached):
+      1. ``error_class`` measured by the evidence path (chron_verify)
+      2. this structural fallback from birth-side fields only
+
+    Structural classes:
+      ASSUMPTION_ERROR     — assumptions were recorded and one broke
+      RANGE_STALE_AT_MINT  — threshold/range claim on a live-market subject
+                             with no assumptions and no mint-time market
+                             evidence; the range was stale before the clock
+                             started (proven: pred-a1210fe9e53c Brent 65–75
+                             vs spot 98.3; fuel-window family)
+      UNKNOWN              — honest floor; insufficient signal is never
+                             forced into a class
+    """
+    if prediction.get("assumptions"):
+        return "ASSUMPTION_ERROR"
+
+    claim = " ".join(
+        str(prediction.get(k) or "") for k in ("claim", "expected_outcome")
+    )
+    has_range_shape = bool(_RANGE_CLAIM_RE.search(claim))
+    market_subject = bool(_RANGE_SUBJECT_RE.search(claim))
+    # Mint-time market evidence appears as an evidence_snapshot entry whose
+    # evidence_class is richer than a bare EVENT_REFERENCE (e.g. MARKET_PROBE).
+    snap = prediction.get("evidence_snapshot") or []
+    mint_market_evidence = any(
+        isinstance(e, dict)
+        and str(e.get("evidence_class", "")).upper() not in ("", "EVENT_REFERENCE")
+        for e in snap
+    )
+    if has_range_shape and market_subject and not mint_market_evidence:
+        return "RANGE_STALE_AT_MINT"
+    return "UNKNOWN"
 
 
 # ───────────────────────── CALIBRATION ─────────────────────────
@@ -817,7 +871,13 @@ def recalibrate_confidence(
 
     if quality == QUALITY_NONE:
         return _outcome(
-            p, False, 0.5, None, 0.0, 0.0, False,
+            p,
+            False,
+            0.5,
+            None,
+            0.0,
+            0.0,
+            False,
             "no decisive verdicts — calibration store empty; proposal passed through unaltered",
         )
 
@@ -828,7 +888,13 @@ def recalibrate_confidence(
         # cannot attribute a single failure to skill. Applying a correction here
         # would be acting on evidence that does not exist.
         return _outcome(
-            p, False, 0.5, snapshot.get("bias"), 0.0, 0.0, False,
+            p,
+            False,
+            0.5,
+            snapshot.get("bias"),
+            0.0,
+            0.0,
+            False,
             "calibration quality INSUFFICIENT: no interpretable outcome — "
             "correction withheld rather than applied on an unmeasurable base rate",
         )
@@ -843,9 +909,11 @@ def recalibrate_confidence(
         # silent fallback here would make an overconfident store look unbiased —
         # the one error this function exists to prevent.
         mc = snapshot.get("mean_confidence")
-        bias = (float(mc) - float(accuracy)) if (
-            mc is not None and accuracy is not None
-        ) else None
+        bias = (
+            (float(mc) - float(accuracy))
+            if (mc is not None and accuracy is not None)
+            else None
+        )
     else:
         bias = float(bias)
     delta = bias if (not skill_usable and bias is not None) else 0.0
@@ -871,7 +939,9 @@ def recalibrate_confidence(
             f"at evidence weight {w:.4f}"
         )
         if abs(shift) <= 1e-12:
-            why += "; shift is zero — the proposal already equals the measured base rate"
+            why += (
+                "; shift is zero — the proposal already equals the measured base rate"
+            )
     if capped:
         why += f"; shift capped at {cap:.4f}"
 
@@ -1141,8 +1211,6 @@ def _load_lessons_for_generation() -> list[dict]:
     try:
         from chron.chron_learn import load_lessons, is_actionable_lesson
 
-        return [
-            {**l, "actionable": is_actionable_lesson(l)} for l in load_lessons()
-        ]
+        return [{**l, "actionable": is_actionable_lesson(l)} for l in load_lessons()]
     except Exception:  # noqa: BLE001
         return []
