@@ -233,5 +233,20 @@ check("the witness is computed from git", "merge-base" in src and "rev-parse" in
 check("and git failure yields UNKNOWN, not a guess",
       'owner_on_master": "UNKNOWN"' in src or '"UNKNOWN"' in src, "")
 
-print("\n" + ("ALL BL02 FAIL-CLOSED TESTS PASSED" if not FAILS else f"FAILURES: {FAILS}"))
-sys.exit(1 if FAILS else 0)
+
+def test_bl02_fail_closed_contract():
+    """pytest witness for the checks above (they already ran at import time).
+
+    Why this exists: this file is a script — every check() fires at module level.
+    A bare module-level `sys.exit(...)` made pytest abort collection with
+    INTERNALERROR "caught unexpected SystemExit", which killed the WHOLE chron
+    suite (`no tests ran`, exit 3) — so 8 groups of contract tests were
+    unrunnable by the project's own test command while still passing standalone.
+    A test the runner cannot run is an unmetabolized claim, not a deliverable.
+    """
+    assert not FAILS, f"BL02 fail-closed contract failures: {FAILS}"
+
+
+if __name__ == "__main__":
+    print("\n" + ("ALL BL02 FAIL-CLOSED TESTS PASSED" if not FAILS else f"FAILURES: {FAILS}"))
+    sys.exit(1 if FAILS else 0)
