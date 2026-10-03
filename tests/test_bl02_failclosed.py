@@ -11,6 +11,10 @@ Provable contract:
   3. measured overconfidence STILL triggers REDUCE_WEIGHT (law not disabled)
   4. partial measured coverage below n>=8 cannot penalise
   5. reliability bins contain only measured-confidence rows
+  6. attribution vocabulary is imported from its durable owner, and the coupling is
+     WITNESSED — a failed import degrades to a local mirror that says so out loud
+  7. no sentinel (UNATTRIBUTED / AMBIGUOUS_SEMANTICS) is ever routable
+  8. the owner claim is derived from git at run time, never hardcoded
 """
 import json
 import os
@@ -29,11 +33,11 @@ def check(name, cond, detail=""):
         FAILS.append(name)
 
 
-def run(rows):
+def run(rows, env_extra=None):
     d = tempfile.mkdtemp(prefix="bl02test-")
     store, out = Path(d) / "predictions.jsonl", Path(d) / "out.json"
     store.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
-    env = dict(os.environ, BL02_STORE=str(store), BL02_OUT=str(out))
+    env = dict(os.environ, BL02_STORE=str(store), BL02_OUT=str(out), **(env_extra or {}))
     p = subprocess.run([sys.executable, SCRIPT], env=env, capture_output=True, text=True, timeout=120)
     assert p.returncode == 0, p.stderr[-600:]
     return json.loads(out.read_text())
@@ -100,11 +104,13 @@ check("source marked partial", c["confidence_source"] == "partial", c["confidenc
 
 print("\nT4  schema + provenance fields")
 res = run([row("s", conf=0.5, brier=0.25, correct=True)])
-check("schema bumped to v3", res["schema"] == "bl02.per_actor.v3", res["schema"])
+check("schema bumped to v4", res["schema"] == "bl02.per_actor.v4", res["schema"])
 check("fail_closed block present", "fail_closed" in res, str(list(res)))
 check("synthetic defaults explicitly false",
       res["per_actor"]["s"]["synthetic_defaults_applied"] is False, "")
 check("supersedes names v1", "v1" in res["fail_closed"]["supersedes"], res["fail_closed"]["supersedes"])
+check("and names v3, whose owner claim was hardcoded", "v3" in res["fail_closed"]["supersedes"],
+      res["fail_closed"]["supersedes"])
 
 print("\nT5  retired claim must not survive as live doctrine")
 src = Path(SCRIPT).read_text()
@@ -184,5 +190,63 @@ check("and are itemised as test_residue",
       res["per_actor"]["UNATTRIBUTED"]["observer_kinds"].get("test_residue") == 8,
       str(res["per_actor"]["UNATTRIBUTED"]["observer_kinds"]))
 
-print("\n" + ("ALL BL02 FAIL-CLOSED TESTS PASSED" if not FAILS else f"FAILURES: {FAILS}"))
-sys.exit(1 if FAILS else 0)
+print("\nT9  attribution vocabulary is imported from its durable owner, and witnessed")
+res = run([row("333-AGI/dynamic-gate", conf=0.9, brier=0.81, correct=False) for _ in range(2)])
+v = res["attribution"]["vocabulary"]
+check("coupling is declared in the artifact", v["coupled"] is True, str(v))
+check("vocabulary_source names the owner commit",
+      v["vocabulary_source"].startswith("chron_attribution@"), v["vocabulary_source"])
+check("owner commit derived at run time, not null", bool(v["owner_commit"]), str(v))
+check("owner_on_master is a derived tri-state, never prose",
+      v["owner_on_master"] in (True, False, "UNKNOWN"), str(v["owner_on_master"]))
+check("a REGISTERED alias rolls up to its lane root — only the owner table knows this",
+      "333-agi" in res["per_actor"] and "333-agi/dynamic-gate" not in res["per_actor"],
+      str(list(res["per_actor"])))
+
+print("\nT9b the fail-safe is WITNESSED, not silent")
+res = run([row("333-AGI/dynamic-gate", conf=0.9, brier=0.81, correct=False) for _ in range(2)],
+          env_extra={"BL02_CHRON_REPO": "/nonexistent/chron-repo"})
+v = res["attribution"]["vocabulary"]
+check("degrades to the local mirror", v["coupled"] is False and v["vocabulary_source"] == "local-mirror", str(v))
+check("and names the reason out loud", bool(v["reason"]), str(v))
+check("still produces output (fail-safe, not fail-hard)", res["schema"] == "bl02.per_actor.v4",
+      str(res.get("schema")))
+check("without the owner table the alias does NOT roll up — the degradation is visible",
+      "333-agi/dynamic-gate" in res["per_actor"], str(list(res["per_actor"])))
+
+print("\nT10 no sentinel may ever enter the routing keyspace")
+res = run([row("ghost", conf=None, brier=None, correct=True) for _ in range(3)] +
+          [row("333-AGI/FI-003", conf=0.9, brier=0.81, correct=False) for _ in range(2)])
+check("both sentinels are declared non-routable",
+      res["attribution"]["non_routable_sentinels"] == ["AMBIGUOUS_SEMANTICS", "UNATTRIBUTED"],
+      str(res["attribution"].get("non_routable_sentinels")))
+leaked = [k for k, c in res["per_actor"].items()
+          if k in ("UNATTRIBUTED", "AMBIGUOUS_SEMANTICS") and (c["routable"] or c["routing_keys"])]
+check("no sentinel row carries a routing key", not leaked, str(leaked))
+src = Path(SCRIPT).read_text()
+check("routability tests the whole sentinel set, not one name",
+      "routable = a not in NON_ROUTABLE" in src and "routable = a != UNATTRIBUTED" not in src, "")
+
+print("\nT11 the owner claim is derived from git, never hardcoded")
+check("no hardcoded owner field remains", "durable_alias_owner" not in src, "")
+check("the witness is computed from git", "merge-base" in src and "rev-parse" in src, "")
+check("and git failure yields UNKNOWN, not a guess",
+      'owner_on_master": "UNKNOWN"' in src or '"UNKNOWN"' in src, "")
+
+
+def test_bl02_fail_closed_contract():
+    """pytest witness for the checks above (they already ran at import time).
+
+    Why this exists: this file is a script — every check() fires at module level.
+    A bare module-level `sys.exit(...)` made pytest abort collection with
+    INTERNALERROR "caught unexpected SystemExit", which killed the WHOLE chron
+    suite (`no tests ran`, exit 3) — so 8 groups of contract tests were
+    unrunnable by the project's own test command while still passing standalone.
+    A test the runner cannot run is an unmetabolized claim, not a deliverable.
+    """
+    assert not FAILS, f"BL02 fail-closed contract failures: {FAILS}"
+
+
+if __name__ == "__main__":
+    print("\n" + ("ALL BL02 FAIL-CLOSED TESTS PASSED" if not FAILS else f"FAILURES: {FAILS}"))
+    sys.exit(1 if FAILS else 0)

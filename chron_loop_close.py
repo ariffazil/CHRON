@@ -38,6 +38,19 @@ LESSONS_FILE = Path("/root/chron/data/lessons.jsonl")
 POLICY_CANDIDATES_FILE = Path("/root/chron/data/policy_candidates.jsonl")
 LOOP_LOG = Path("/root/chron/data/loop_log.jsonl")
 
+# BL02 per-actor calibration. The producer lives OUTSIDE this repo
+# (/root/scripts), but its artifact has a real downstream consumer:
+# fed_router.py:49 `_CALIB_FILE` reads it to apply the BL12 REDUCE_WEIGHT
+# routing penalty. A consumer with no scheduled producer reads a stale artifact
+# forever, and that silence reads as health — measured 2026-10-02: the artifact
+# existed, `crontab -l | grep -ci bl02` was 0, and no unit/timer invoked it.
+# The loop-closer therefore owns the refresh, on the EXISTING
+# chron-loop-closer.timer (daily 07:15 MYT). No new cron, no new timer
+# (event-driven-first doctrine, F13 2026-09-20).
+BL02_PRODUCER = Path("/root/scripts/bl02_calibration_curves.py")
+BL02_ARTIFACT = Path("/root/chron/data/calibration_per_actor.json")
+BL02_TIMEOUT_S = 120
+
 MYT = timezone(timedelta(hours=8))
 
 # Best-effort outbound steps that must never fail the loop, but must never fail
@@ -504,6 +517,89 @@ def _run_step(name: str, fn, *args, **kwargs) -> dict:
         return {"ok": False, "result": None, "error": f"{type(e).__name__}: {e}"}
 
 
+# ───────────────────── BL02 CALIBRATION PRODUCER ─────────────────────
+
+
+def _bl02_artifact_view() -> dict:
+    """Read the BL02 artifact as DATA. Absent/corrupt is a state, not an exception."""
+    if not BL02_ARTIFACT.exists():
+        return {"present": False}
+    try:
+        doc = json.loads(BL02_ARTIFACT.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 — reported as a state below
+        return {"present": True, "readable": False, "error": f"{type(e).__name__}: {e}"}
+    attribution = doc.get("attribution") or {}
+    vocabulary = attribution.get("vocabulary") or {}
+    return {
+        "present": True,
+        "readable": True,
+        "schema": doc.get("schema"),
+        "generated_utc": doc.get("generated_utc"),
+        "routable_actors": attribution.get("routable_actors"),
+        "actor_buckets": sorted((doc.get("per_actor") or {}).keys()),
+        "vocabulary_source": vocabulary.get("vocabulary_source"),
+        "owner_on_master": vocabulary.get("owner_on_master"),
+    }
+
+
+def _refresh_bl02_calibration() -> dict:
+    """Regenerate the per-actor calibration artifact that FED routing consumes.
+
+    Consumption = governance: fed_router.py:49 `_CALIB_FILE` reads BL02_ARTIFACT
+    to apply the BL12 REDUCE_WEIGHT routing penalty. Measured 2026-10-02, nothing
+    regenerated that artifact on any schedule (`crontab -l | grep -ci bl02` = 0,
+    no unit or timer referenced the producer), so the router's advisory was only
+    ever as fresh as the last manual run — and a stale advisory is
+    indistinguishable from a healthy one.
+
+    Failures RAISE, so _run_step records them and the loop reports DEGRADED with
+    the step named. A dark producer must not look like a quiet loop.
+    """
+    before = _bl02_artifact_view()
+
+    if not BL02_PRODUCER.exists():
+        raise RuntimeError(f"BL02 producer absent: {BL02_PRODUCER}")
+
+    import subprocess
+
+    proc = subprocess.run(
+        ["/usr/bin/python3", str(BL02_PRODUCER)],
+        capture_output=True,
+        text=True,
+        timeout=BL02_TIMEOUT_S,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"BL02 producer exited {proc.returncode}: "
+            f"{(proc.stderr or proc.stdout or '').strip()[-400:]}"
+        )
+
+    after = _bl02_artifact_view()
+    if not after.get("readable"):
+        raise RuntimeError(f"BL02 artifact unreadable after refresh: {after.get('error')}")
+    # Proves the write actually landed instead of trusting the exit code: the
+    # producer stamps generated_utc with microseconds on every run.
+    if after.get("generated_utc") == before.get("generated_utc"):
+        raise RuntimeError(
+            "BL02 generated_utc unchanged after a successful producer run "
+            f"({after.get('generated_utc')}) — producer did not write the file we read"
+        )
+
+    return {
+        "arrow": "CALIBRATION → ROUTING ADVISORY",
+        "status": "REFRESHED",
+        "consumer": "fed_router.py:49 _CALIB_FILE (BL12 routing penalty)",
+        "schedule": "chron-loop-closer.timer (existing, daily 07:15 MYT) — no new cron",
+        "before": before,
+        "after": after,
+        "delta": {
+            "routable_actors": (after.get("routable_actors") or 0)
+            - (before.get("routable_actors") or 0),
+        },
+        "error": None,
+    }
+
+
 # ───────────────────────── FULL LOOP ─────────────────────────
 
 
@@ -596,12 +692,34 @@ def run_full_loop(dry_run: bool = False) -> dict:
     else:
         result["arrows"]["memory_to_policy"] = pol["result"]
 
+    # BL02 producer step — regenerates the calibration artifact that FED routing
+    # already reads (fed_router.py:49). Skipped on a dry pass because a dry run
+    # writes nothing at all (invariant established 2026-09-18).
+    if dry_run:
+        result["arrows"]["bl02_calibration"] = {
+            "arrow": "CALIBRATION → ROUTING ADVISORY",
+            "status": "SKIPPED_DRY_RUN",
+            "error": None,
+        }
+    else:
+        bl02 = _run_step("bl02_calibration", _refresh_bl02_calibration)
+        if not bl02["ok"]:
+            errors.append({"step": "bl02_calibration", "error": bl02["error"]})
+            result["arrows"]["bl02_calibration"] = {
+                "arrow": "CALIBRATION → ROUTING ADVISORY",
+                "status": "ERROR",
+                "error": bl02["error"],
+            }
+        else:
+            result["arrows"]["bl02_calibration"] = bl02["result"]
+
     result["completed_at"] = _now_iso()
 
     # ── DELTA: what changed because of this run ──
     e2m = result["arrows"].get("experience_to_memory", {})
     o2l = result["arrows"].get("outcome_to_learning", {})
     m2p = result["arrows"].get("memory_to_policy", {})
+    bl02r = result["arrows"].get("bl02_calibration", {})
     episodes_after = get_store().count()
     delta = {
         "episodes_created": episodes_after - episodes_before,
@@ -618,6 +736,10 @@ def run_full_loop(dry_run: bool = False) -> dict:
         "lessons_extracted": o2l.get("lessons_extracted", 0),
         "outcomes_unclassified": o2l.get("outcomes_unclassified", 0),
         "policies_promoted": m2p.get("promoted", 0),
+        # A LEVEL, not a change: how many actors FED routing can currently steer.
+        # Excluded from the ACTIVE test below — a nonzero count is a property of
+        # the store, not something this run did. None means the step did not run.
+        "bl02_routable_actors": (bl02r.get("after") or {}).get("routable_actors"),
     }
 
     # ── STATE: what is true after this run ──
@@ -636,7 +758,7 @@ def run_full_loop(dry_run: bool = False) -> dict:
         status = "DEGRADED"
     elif any(
         v for k, v in delta.items()
-        if k not in ("predictions_new", "episodes_created_reported")
+        if k not in ("predictions_new", "episodes_created_reported", "bl02_routable_actors")
     ):
         status = "ACTIVE"
     else:
