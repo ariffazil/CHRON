@@ -1,0 +1,64 @@
+# CHRON — Temporal Intelligence & Calibration Engine
+> "Demi masa. Time is the witness."
+> The temporal cortex of the arifOS Federation.
+> Port: 18102 (FastMCP streamable-http) | Authority: 555_COMPUTE_ONLY | License: AGPL-3.0
+> Public Endpoint: https://chron.arif-fazil.com/mcp | Local Service: chron-mcp.service
+
+## Identity & Purpose
+CHRON is not a cron scheduler, not a calendar, and not a passive database.
+It is the **temporal cortex** of the arifOS Federation, enforcing the Arrow of Time:
+$$\text{Event} \longrightarrow \text{Prediction} \longrightarrow \text{Verification} \longrightarrow \text{Error/Gap} \longrightarrow \text{Lesson} \longrightarrow \text{Policy}$$
+
+Its primary mission is **Calibration Verification**:
+- Every belief about the future must be falsifiable and dated.
+- Predictions are scored with proper scoring rules (Brier score, ECE calibration).
+- The gap between expectation and reality is the sole genuine training fuel for wisdom.
+- CHRON computes and verifies. It never adjudicates (arifOS judges) and never executes mutations (A-FORGE acts).
+
+## MCP Tools (19 Tools)
+
+### Prediction & Verification
+- `chron_active_predictions`: Query forward-looking predictions currently open in the state store.
+- `chron_predictions_due`: Surface predictions that have reached their target resolution timestamp.
+- `chron_record_verification`: Record the ground-truth observed outcome for a due prediction (`VERIFIED_TRUE`, `VERIFIED_FALSE`, `UNVERIFIABLE`).
+- `chron_verified_predictions`: Historical audit ledger of all closed predictions and verification receipts.
+- `chron_generate_predictions`: Generate structured, falsifiable predictions from new incoming events.
+- `chron_resolve_unverifiable`: Prune or resolve predictions that cannot be tested against reality.
+
+### Calibration & Learning
+- `chron_calibration_state`: Compute Brier score, calibration curve, and overconfidence/underconfidence curves across prediction domains.
+- `chron_lessons`: Retrieve accumulated lessons learned from historical prediction gaps.
+- `chron_episodes`: Query multi-step narrative episodes and learning state.
+
+### Temporal Events & Attention Debt
+- `chron_create_event`: Register a new timestamped event anchor in the temporal state store.
+- `chron_active_events`: List currently active events under observation.
+- `chron_temporal_briefing`: Generate executive synthesis of temporal status, overdue checks, and temporal drift.
+- `chron_attention_debt`: Calculate accumulated attention debt from open loops, expired horizons, and unclosed predictions.
+- `chron_reconcile_state`: Reconcile state horizons between fast loops and long-term milestones.
+
+### Proxy vs Reality Framework
+- `chron_proxy_reality_register`: Register paired proxy indicators against ground-truth reality metrics.
+- `chron_proxy_reality_observe`: Ingest real-world observations for registered proxy/reality metric pairs.
+- `chron_proxy_reality_state`: Evaluate statistical correlation and divergence between proxy metrics and reality.
+
+### Diagnostics & Store Health
+- `chron_store_stats`: Integrity statistics, record generation count, and schema version.
+- `chron_last_loop`: Review telemetry and logs from the latest automated verification loop.
+
+## Machine Integration
+To connect any MCP-enabled agent (Cursor, Claude Desktop, Antigravity, Gemini CLI):
+```json
+{
+  "mcpServers": {
+    "chron": {
+      "url": "https://chron.arif-fazil.com/mcp"
+    }
+  }
+}
+```
+
+Or query health directly:
+```bash
+curl -s http://127.0.0.1:18102/health
+```
