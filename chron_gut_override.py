@@ -227,6 +227,18 @@ def record_gut_override(
                          "ledger exists to catch. Put paraphrase in "
                          "gut_read_agent_paraphrase instead — it is retained but "
                          "never scored."}
+    # F2 belt-and-braces (FI-008 partial-quote laundering defense, 2026-10-07):
+    # even if _is_verbatim_quote is ever loosened, refuse anything whose
+    # gut_read begins a quote or verbatim: marker but is not closed. The
+    # canonical helper above already enforces this; the second check
+    # makes the invariant harder to regress.
+    if gut_read.strip() and not _is_verbatim_quote(gut_read):
+        return {"recorded": False,
+                "error": "gut_read is not a closed verbatim quote "
+                         "(FI-008 amendment 2026-10-04, hardened 2026-10-07). "
+                         "An agent-synthesised gut_read launders the exact "
+                         "R-FILTER defect this ledger exists to catch."}
+
 
     # Domain is normalised on WRITE, not at query time. Normalising only in the
     # calibration query would leave the ledger itself fragmented, so any other

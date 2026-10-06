@@ -3,7 +3,7 @@
 Exposes CHRON's prediction, verification, calibration, episode,
 lesson, proxy-reality, and attention-debt stores as MCP tools.
 
-19 tools · 8 resources · 4 prompts · v4.0.6 (2026-09-28)
+20 tools · 8 resources · 4 prompts · v4.1.0 (2026-10-06 — chron_frame_witness bridge lit)
 
 Arrow of Time lifecycle:
     Event → Prediction → Verification → Error → Lesson → Policy
@@ -69,6 +69,14 @@ from chron.chron_proxy_reality import (
     compute_all as pr_compute_all,
     seed_defaults as pr_seed_defaults,
 )
+from chron.chron_frame import (
+    request_witness as fw_request,
+    check_witness_results as fw_results,
+    record_witness_result as fw_record,
+    FRAME_URL,
+)
+import urllib.request
+import urllib.error
 from enum import Enum
 
 
@@ -116,10 +124,13 @@ class EventKind(str, Enum):
 
 mcp = FastMCP(
     "CHRON",
+    version="4.1.0",
     instructions=(
-        "CHRON — Temporal Consequence Tracker. v4.0.6. "
-        "19 tools across the Arrow of Time: Event → Prediction → Verification → "
+        "CHRON — Temporal Consequence Tracker. v4.1.0. "
+        "20 tools across the Arrow of Time: Event → Prediction → Verification → "
         "Error → Lesson. Predicts, verifies, calibrates, learns. "
+        "chron_frame_witness bridges the independent FRAME witness (separation of "
+        "powers: FRAME observes from outside, arifOS adjudicates). "
         "Not a scheduler. Not a memory store. "
         "The organ that answers: What did we expect? What happened? Were we wrong? "
         "What did we learn? Are our proxies gaming us?"
@@ -1089,6 +1100,7 @@ def chron_create_event(
     confidence: str = "TENTATIVE",
     consequence: str = "MEDIUM",
     actionability: str = "WATCH",
+    amplitude: float | None = None,
 ) -> dict:
     """Create a new event in chron_events.json — plant a temporal stake.
 
@@ -1107,6 +1119,14 @@ def chron_create_event(
         confidence: CONFIRMED / LIKELY / ANNOUNCED / PREDICTED / TENTATIVE
         consequence: HIGH / MEDIUM / LOW
         actionability: PREPARE / WATCH / MONITOR
+        amplitude: Optional numeric probability in [0.0, 1.0] for a forecast.
+            When supplied it becomes the generated prediction's
+            confidence_proposed verbatim, OVERRIDING the coarse `confidence`
+            enum. This is what lets a superposition of competing branches keep
+            its discrimination through recalibration and Brier scoring — without
+            it every forecast collapses onto the enum default and the calibrator
+            cannot tell a 0.25 claim from a 0.55 claim. Omit for non-forecast
+            events (birthdays, deadlines, fiscal windows).
     """
     chron_events_path = Path("/root/AAA/scripts/chron_events.json")
     if not chron_events_path.exists():
@@ -1146,6 +1166,24 @@ def chron_create_event(
         "note": note,
     }
 
+    # Amplitude is optional and validated at the boundary: an out-of-range or
+    # non-numeric value is a caller bug, and silently clamping it would forge a
+    # probability the forecaster never asserted.
+    if amplitude is not None:
+        try:
+            amp = float(amplitude)
+        except (TypeError, ValueError):
+            return {
+                "error": f"amplitude must be numeric, got {amplitude!r}",
+                "query_time": _now_iso(),
+            }
+        if not 0.0 <= amp <= 1.0:
+            return {
+                "error": f"amplitude must be within [0.0, 1.0], got {amp}",
+                "query_time": _now_iso(),
+            }
+        new_event["amplitude"] = amp
+
     events.append(new_event)
     data["events"] = events
     data["_updated"] = datetime.now(MYT).strftime("%Y-%m-%d")
@@ -1156,6 +1194,7 @@ def chron_create_event(
         "event_id": event_id,
         "title": title,
         "target_date": target_date,
+        "amplitude": new_event.get("amplitude"),
         "total_events": len(events),
         "query_time": _now_iso(),
     }
@@ -1285,6 +1324,130 @@ def chron_proxy_reality_state(organ: str = "", window: int = 5) -> dict:
     result = pr_compute_all(organ=organ if organ else None, window=window)
     return {
         **result,
+        "query_time": _now_iso(),
+    }
+
+
+@mcp.tool()
+def chron_frame_witness(
+    action: str = "witness",
+    claims: list | None = None,
+    claim_id: str = "",
+) -> dict:
+    """Independent witness bridge — have FRAME (outside CHRON) mechanically check atomic claims.
+
+    Separation of powers (constitution): CHRON owns the temporal ledger; FRAME is the
+    independent witness and can say CHRON is wrong. FRAME observes, never executes,
+    and returns evidence only — VERIFIED / CONTRADICTED / UNVERIFIABLE / STALE / EACCES.
+    It NEVER returns SEAL/HOLD; adjudication stays with arifOS.
+
+    Use before recording a verification, when a claim's evidence should be checked by
+    a process that did not author it, or whenever CHRON state must be witnessed from
+    outside its own walls.
+
+    Args:
+        action: 'witness' — submit claims to FRAME's mechanical checker;
+                'results' — read recorded witness results (optionally filtered).
+        claims: list of {text, evidence:{check, path, field?, equals?, max_age_seconds?}}.
+                Evidence kinds: file_exists, file_fresh, json_field. Unpointed prose
+                is UNVERIFIABLE by design — fluency never certifies.
+        claim_id: optional filter for action='results'.
+
+    Returns:
+        For 'witness': FRAME's per-claim rows + rolled-up witness verdict
+        (CONFIRMED / CONTESTED / UNVERIFIABLE), evidence quality, contradictions,
+        confidence, and audit trail refs (frame_requests.jsonl / frame_results.jsonl).
+        For 'results': the recorded witness results.
+    """
+    if action == "results":
+        rows = fw_results(claim_id or None)
+        return {
+            "witness_results": rows,
+            "count": len(rows),
+            "query_time": _now_iso(),
+        }
+
+    if not isinstance(claims, list) or not claims:
+        return {
+            "error": "action='witness' requires claims: list[{text, evidence{check,...}}]",
+            "query_time": _now_iso(),
+        }
+
+    summary_text = "; ".join(str(c.get("text", ""))[:80] for c in claims[:5])
+    req = fw_request(
+        claim=summary_text or "unnamed claim set",
+        evidence=[json.dumps(c.get("evidence", {})) for c in claims[:20]],
+        source="chron_frame_witness",
+    )
+
+    try:
+        payload = json.dumps({"claims": claims}).encode()
+        http_req = urllib.request.Request(
+            f"{FRAME_URL}/frame/witness/claims",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(http_req, timeout=15) as resp:
+            frame_out = json.loads(resp.read())
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return {
+            "error": f"FRAME unreachable at {FRAME_URL}: {exc}",
+            "request_logged": True,
+            "request": req,
+            "note": "witness request stays PENDING in frame_requests.jsonl",
+            "query_time": _now_iso(),
+        }
+
+    rows = frame_out.get("rows", [])
+    counts = frame_out.get("counts", {})
+    n_contradicted = counts.get("CONTRADICTED", 0)
+    n_verified = counts.get("VERIFIED", 0)
+    n_stale = counts.get("STALE", 0)
+    n_unverifiable = counts.get("UNVERIFIABLE", 0) + counts.get("EACCES", 0)
+
+    if n_contradicted:
+        verdict = "CONTESTED"
+    elif n_verified:
+        verdict = "CONFIRMED"
+    else:
+        verdict = "UNVERIFIABLE"
+
+    if n_unverifiable == 0 and n_contradicted == 0:
+        quality = "OBSERVED"
+    elif n_verified or n_stale:
+        quality = "INFERRED"
+    else:
+        quality = "SPECULATIVE"
+
+    contradictions = [r.get("claim", "") for r in rows if r.get("status") == "CONTRADICTED"]
+    decided = n_verified + n_stale + n_contradicted + n_unverifiable
+    confidence = round(n_verified / decided, 3) if decided else 0.0
+
+    rec = fw_record(
+        claim=summary_text or "unnamed claim set",
+        verdict=verdict,
+        evidence_quality=quality,
+        contradictions=contradictions,
+        confidence=confidence,
+    )
+
+    return {
+        "witness_verdict": verdict,
+        "evidence_quality": quality,
+        "contradictions": contradictions,
+        "confidence": confidence,
+        "frame_counts": counts,
+        "rows": rows,
+        "discipline_note": frame_out.get(
+            "discipline_note",
+            "action-trace evidence outranks prose; FRAME never executes commands",
+        ),
+        "audit": {
+            "request_file": "frame_requests.jsonl",
+            "result_id": rec.get("result_id"),
+            "frame_url": f"{FRAME_URL}/frame/witness/claims",
+        },
         "query_time": _now_iso(),
     }
 

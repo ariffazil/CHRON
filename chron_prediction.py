@@ -120,6 +120,15 @@ def create_prediction(
     trigger: str = "manual",
     loop_id: Optional[str] = None,
     audience: str = "both",
+    # ── R-FILTER SCHEMA BUMP (2026-10-03) ──────────────────────────────────
+    # Companion to rationality-filter-doctrine.md. Optional list of classes
+    # for predictions that depend on data the corpus systematically
+    # underrepresents (gut instinct, leader decisions, private relationships,
+    # scar revisions). When non-empty, confidence is clamped to the
+    # corresponding ceiling — the model cannot claim high confidence on
+    # data it cannot see. See Q-MAP §13 (R-FILTER theorem).
+    rationality_filter_class: Optional[list[str]] = None,
+    rationality_filter_confidence_ceiling: float = 0.65,
     **extra,
 ) -> dict:
     """Create a new prediction object.
@@ -154,6 +163,16 @@ def create_prediction(
         "world_state_hash": world_state_hash,
         "success_rule": success_rule,
         "falsification_rule": falsification_rule,
+        # ── R-FILTER provenance (immutable) — 2026-10-03 schema bump ─────
+        # R-FILTER theorem: a prediction whose class depends on private data
+        # cannot carry confidence above the class ceiling. The clamp happens
+        # at birth, not at read time — the birth record is the witness.
+        "rationality_filter_class": list(rationality_filter_class or []),
+        "rationality_filter_confidence_ceiling": (
+            rationality_filter_confidence_ceiling
+            if (rationality_filter_class)
+            else 1.0
+        ),
         # ── Provenance (immutable) ──
         "source": source,
         "source_id": source_id,
@@ -186,6 +205,19 @@ def create_prediction(
         "lesson_id": None,
         "supersedes": None,
     }
+    # R-FILTER confidence clamp (2026-10-03 schema bump): if a non-empty
+    # rationality_filter_class is present, confidence may not exceed the
+    # class ceiling. This is the operational form of the theorem that says
+    # the model cannot claim high confidence on data the corpus systematically
+    # underrepresents. The clamp writes the witness into the birth record,
+    # not the read surface.
+    rfc = pred.get("rationality_filter_class") or []
+    if rfc:
+        ceiling = pred.get("rationality_filter_confidence_ceiling", 0.65)
+        if pred["confidence"] > ceiling:
+            pred["confidence"] = ceiling
+            pred["_rfilter_clamped"] = True
+
     pred.update(extra)
     save_prediction(pred)
 
@@ -610,6 +642,15 @@ def _classify_error(prediction: dict) -> str:
 
 # ───────────────────────── CALIBRATION ─────────────────────────
 
+
+# NOTE: GUT-OVERRIDE LEDGER (GOL) functions live canonically in
+# chron.chron_gut_override. The duplicate block that previously lived
+# here (added during the 2026-10-04 FI-008 audit response) was
+# removed 2026-10-07 because no caller imports these names from
+# chron_prediction (chron_cron_verify and production code import
+# from chron.chron_gut_override only). Anti-Bangang LAW 8 forbids
+# duplicate governance surfaces. Canonical spec:
+#   /root/AAA/instructions/gut-override-ledger-spec.md
 
 def compute_calibration() -> dict:
     """Compute calibration statistics over decided predictions.
@@ -1150,13 +1191,29 @@ def generate_from_chron_events() -> list[dict]:
         if dedup_key in existing_keys:
             continue
 
+        # PREDICTED was MISSING from this map until 2026-10-03 (FI-003, D3).
+        # It fell through to the 0.5 default while TENTATIVE scored 0.6, so the
+        # weakest label calibrated ABOVE an actual forecast. Measured effect on
+        # the 2026-10-03 AGI branch set: branch C (asserted amplitude 0.25) and
+        # branch E (0.30) both landed at confidence 0.5412, while branch A
+        # (0.55) landed LOWER at 0.4942 — the ordering inverted, so Brier
+        # scoring would have penalised the confident branch least.
         confidence_map = {
             "CONFIRMED": 0.9,
-            "LIKELY": 0.7,
             "ANNOUNCED": 0.8,
+            "LIKELY": 0.7,
+            "PREDICTED": 0.65,
             "TENTATIVE": 0.6,
         }
-        proposed = float(confidence_map.get(event.get("confidence", ""), 0.5))
+        # An explicit numeric amplitude always wins over the enum. The enum is a
+        # coarse label; the amplitude is the actual claim being scored. Without
+        # this the forecaster's real probability is discarded before
+        # confidence_proposed and the calibrator cannot discriminate.
+        amp = event.get("amplitude")
+        if isinstance(amp, (int, float)) and not isinstance(amp, bool) and 0.0 <= float(amp) <= 1.0:
+            proposed = float(amp)
+        else:
+            proposed = float(confidence_map.get(event.get("confidence", ""), 0.5))
         outcome = recalibrate_confidence(proposed, snapshot)
 
         pred = create_prediction(

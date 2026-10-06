@@ -149,6 +149,179 @@ def _evidence_for(pred: dict, event: dict) -> Optional[dict]:
     return None
 
 
+# ───────────────────────── EXEC_PROBE EVIDENCE CLASS (musyawarah packet 2026-10-04, step 5) ─────────────────────────
+#
+# Machine probes for predictions born with an A-FORGE reality_probe binding
+# (probe_id = "aforge-exec:<kind>:<target>"). The verifier — a DIFFERENT
+# process from the executor — issues the declared READ-ONLY probe against the
+# A-FORGE MCP surface over loopback. Independence by construction (verifier
+# process ≠ executor process), mirroring reconcile.ts verifyProbeIndependence.
+#
+# Probe specs are restricted to an OBSERVE-band allowlist: the map below is a
+# CLOSED set, and every mapped call is a read-only tool invocation. Anything
+# not in the map, any transport failure, any ambiguous answer ⇒ DECLINE —
+# a false verdict is worse than no verdict (this file's own doctrine).
+
+import os
+
+AFORGE_PROBE_MCP_URL = os.environ.get("AFORGE_PROBE_MCP_URL", "http://127.0.0.1:7072/mcp")
+# NOTE (2026-10-04): the packet named the sense lane :7071 (read-only by
+# charter). On the live tree, :7071 is the express/bridge lane and A-FORGE's
+# own MCP tool surface (forge_filesystem stat, forge_vps_services list) is
+# served statelessly on :7072. The OBSERVE-band allowlist below — not the
+# port — is the enforcement mechanism; every allowlisted call is read-only.
+
+_EXEC_PROBE_PREFIX = "aforge-exec:"
+_EXEC_PROBE_TIMEOUT = 6
+
+# OBSERVE-band allowlist: probe kind → (tool, args builder). CLOSED set.
+_EXEC_PROBE_ALLOWLIST = {
+    "file_stat": lambda target: ("forge_filesystem", {"mode": "stat", "path": target}),
+    "service_list": lambda target: ("forge_vps_services", {"mode": "list"}),
+}
+
+
+def _exec_probe_call(tool: str, args: dict) -> Optional[dict]:
+    """One stateless read-only MCP tools/call. None on any transport failure."""
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            AFORGE_PROBE_MCP_URL,
+            data=json.dumps({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": tool, "arguments": args},
+            }).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=_EXEC_PROBE_TIMEOUT) as resp:
+            body = resp.read().decode()
+        payload = body
+        for line in body.split("\n"):
+            if line.startswith("data: "):
+                payload = line[len("data: "):]
+                break
+        envelope = json.loads(payload)
+        if envelope.get("error"):
+            return None
+        result = envelope.get("result", {})
+        if result.get("isError"):
+            return None
+        text = (result.get("content") or [{}])[0].get("text", "")
+        return json.loads(text) if text.strip().startswith("{") else {"raw": text}
+    except (urllib.error.URLError, TimeoutError, OSError,
+               json.JSONDecodeError, ValueError) as exc:
+        # 2026-10-07: debug-level log so a transport regression
+        # is recoverable instead of invisible. The outer
+        # EXEC_PROBE allowlist still treats any failure as
+        # DECLINE (no verdict) — that's correct doctrine.
+        import logging as _logging
+        _logging.getLogger(__name__).debug(
+            "_exec_probe_call transport failure: %s: %s",
+            type(exc).__name__, exc,
+        )
+        return None
+    except Exception as exc:
+        # Truly unexpected — log at warning so the on-call sees it.
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "_exec_probe_call UNEXPECTED: %s: %s",
+            type(exc).__name__, exc,
+        )
+        return None
+
+
+def _evidence_for_exec_probe(pred: dict) -> Optional[dict]:
+    """EXEC_PROBE evidence acquisition. None when declining (the normal outcome).
+
+    Only speaks when the allowlisted read-only probe actually ran AND its
+    answer is unambiguous:
+      file_stat    status OK      → effect observed            (error 0.0)
+      file_stat    ENOENT         → effect observed ABSENT     (error 1.0, EFFECT_MISS)
+      file_stat    other ERROR    → decline (boundary/misconfig ≠ effect-miss)
+      service_list unit present   → effect observed            (error 0.0)
+      service_list unit absent    → decline (listing may be filtered — absence
+                                     is ambiguous, not falsification)
+    """
+    binding = pred.get("probe_id") or pred.get("binding")
+    if not isinstance(binding, str) or not binding.startswith(_EXEC_PROBE_PREFIX):
+        return None
+    rest = binding[len(_EXEC_PROBE_PREFIX):]
+    kind, _, target = rest.partition(":")
+    if kind not in _EXEC_PROBE_ALLOWLIST or not target.strip():
+        return None  # non-allowlisted or malformed ⇒ decline, never execute
+    tool, args = _EXEC_PROBE_ALLOWLIST[kind](target)
+
+    out = _exec_probe_call(tool, args)
+    if out is None:
+        return None  # transport/tool failure ⇒ decline
+    status = str(out.get("status", "")).upper()
+
+    if kind == "file_stat":
+        if status == "OK":
+            return {
+                "observed": f"EXEC_PROBE file_stat OK: {target} exists (size={out.get('size')})",
+                "error": 0.0,
+                "error_class": "EXEC_PROBE",
+                "source": f"{AFORGE_PROBE_MCP_URL}#forge_filesystem:stat",
+                "evidence_class": "EXEC_PROBE",
+            }
+        if "ENOENT" in str(out.get("data", "")):
+            return {
+                "observed": (
+                    f"EXEC_PROBE file_stat ENOENT: {target} does NOT exist — "
+                    "declared effect absent"
+                ),
+                "error": 1.0,
+                "error_class": "EFFECT_MISS",
+                "source": f"{AFORGE_PROBE_MCP_URL}#forge_filesystem:stat",
+                "evidence_class": "EXEC_PROBE",
+            }
+        return None  # boundary rejection / other error — ambiguous, decline
+
+    if kind == "service_list":
+        services = out.get("services") or []
+        wanted = target if target.endswith(".service") else target + ".service"
+        names = {str(s.get("name", "")) for s in services}
+        bares = {n[: -len(".service")] if n.endswith(".service") else n for n in names}
+        bare_target = target[: -len(".service")] if target.endswith(".service") else target
+        if wanted in names or bare_target in bares:
+            state = next(
+                (s.get("status") for s in services if str(s.get("name", "")) == wanted),
+                "?",
+            )
+            return {
+                "observed": f"EXEC_PROBE service_list: unit {target} present (status={state})",
+                "error": 0.0,
+                "error_class": "EXEC_PROBE",
+                "source": f"{AFORGE_PROBE_MCP_URL}#forge_vps_services:list",
+                "evidence_class": "EXEC_PROBE",
+            }
+        return None  # absent from listing is ambiguous (filters) — decline
+
+    return None
+
+
+def _verify_exec_probe(pred: dict) -> tuple[dict, str, Optional[float], str]:
+    """Verify one EXEC_PROBE-bound prediction. Declines unless unambiguous."""
+    ev = _evidence_for_exec_probe(pred)
+    if ev is not None:
+        return pred, ev["observed"], ev["error"], ev["error_class"]
+    return (
+        pred,
+        "EXEC_PROBE declined — probe absent, non-allowlisted, or answer ambiguous "
+        "(no verdict is manufactured)",
+        None,
+        "AWAITING_EVIDENCE",
+    )
+
+
 # ───────────────────────── VERIFICATION ─────────────────────────
 
 
@@ -255,8 +428,13 @@ def run_verification(dry_run: bool = False) -> dict:
             )
             continue
 
-        # Verify based on source
-        if pred.get("source") == "chron_events":
+        # Verify based on source. EXEC_PROBE-bound predictions (A-FORGE shadow
+        # records) verify via the read-only machine probe FIRST — their
+        # evidence class is mechanical, not web-search.
+        _binding = str(pred.get("probe_id") or pred.get("binding") or "")
+        if _binding.startswith(_EXEC_PROBE_PREFIX):
+            pred, observed, error, error_class = _verify_exec_probe(pred)
+        elif pred.get("source") == "chron_events":
             pred, observed, error, error_class = verify_event_prediction(pred)
         else:
             observed = "UNKNOWN — no verification method for source"
