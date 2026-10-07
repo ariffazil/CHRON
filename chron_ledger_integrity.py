@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -433,6 +434,55 @@ def _tally(observations: list[dict]) -> dict:
     }
 
 
+# D4-PATCH-2026-10-07: Wilson 95% CI + small-sample quality surface.
+# Pure functions. No behavior change at n>=MIN_EFFECTIVE_N.
+# Backed up at /root/.hermes/cache/scratch/patches-2026-10-07/bak/chron_ledger_integrity.py.bak-2026-10-07T1630Z
+# Doc: arifOS audit 2026-10-07 (D4 distill). F13 SAH chain.
+
+def wilson_ci95(k: int, n: int) -> tuple[float, float]:
+    """Wilson score 95% CI on a binomial hit-rate. Returns (lo, hi) in [0, 1].
+    Stable for n>=1; returns (0.0, 1.0) when n=0 (no evidence, no claim).
+    Newcombe 1998, z=1.96, no continuity correction.
+    """
+    if n <= 0:
+        return (0.0, 1.0)
+    z = 1.959963984540291
+    p = k / n
+    denom = 1.0 + z*z / n
+    centre = (p + z*z / (2.0*n)) / denom
+    half = (z * math.sqrt(p*(1.0 - p)/n + z*z/(4.0*n*n))) / denom
+    return (max(0.0, centre - half), min(1.0, centre + half))
+
+
+# Mirror of MIN_EFFECTIVE_N in chron_prediction — duplicated here to avoid
+# import cycle (chron_prediction imports compute_calibration from this module).
+MIN_EFFECTIVE_N = 8
+QUALITY_INSUFFICIENT = "INSUFFICIENT"
+QUALITY_SUFFICIENT = "SUFFICIENT"
+
+
+def quality_and_warnings(effective: dict, _decisives: int) -> tuple[str, list[str]]:
+    """Pure. Returns (quality, warnings_list) for the published payload.
+    Quality floor: n < MIN_EFFECTIVE_N -> INSUFFICIENT (point estimate not yet
+    a skill estimate). Warnings are non-fatal advisories; the truth surface
+    remains observable even when small.
+    """
+    n = int(effective.get("n") or 0)
+    k = int(effective.get("correct") or 0)
+    warnings: list[str] = []
+    if n == 0:
+        warnings.append("ZERO_SAMPLE: accuracy/mean_brier are not defined.")
+        return QUALITY_INSUFFICIENT, warnings
+    if n < MIN_EFFECTIVE_N:
+        warnings.append(
+            f"SMALL_SAMPLE: effective_n={n} < MIN_EFFECTIVE_N={MIN_EFFECTIVE_N}; "
+            f"point estimate may be 1-2 observations from the true rate. "
+            f"Wilson 95% CI accompanies the accuracy figure."
+        )
+        return QUALITY_INSUFFICIENT, warnings
+    return QUALITY_SUFFICIENT, warnings
+
+
 def compute_calibration_unified() -> dict:
     """The ONE calibration computation. Every surface must read this."""
     ledger = build_settled_ledger()
@@ -445,6 +495,44 @@ def compute_calibration_unified() -> dict:
     raw_rows_all_stores = ledger["settled_rows"]
     raw_correct = sum(1 for r in raw_rows if r["verdict"] == VERDICT_CORRECT)
     raw_briers = [r["brier_score"] for r in raw_rows if r["brier_score"] is not None]
+
+    # ── R-FILTER CALIBRATION SPLIT (2026-10-03) ─────────────────────────
+    # Rationality Filter doctrine: split miss rate by rationality_filter_class.
+    # Predictions whose class is 'none' / [] represent corpus-present data; the
+    # miss rate on these IS the model's real skill. Predictions whose class is
+    # non-empty depend on data the corpus systematically underrepresents; the
+    # miss rate on these is the EXPECTED boundary cost from the R-FILTER
+    # theorem, not a model defect. Reporting them as one number collapses the
+    # apparatus bias into a single 'model skill' score — exactly the laundered
+    # record the doctrine exists to expose.
+    #
+    # Companion: rationality-filter-quantum-map.md §13 (R-FILTER theorem) +
+    # rationality-filter-doctrine.md §A.4 (calibration split).
+    corpus_rows = [r for r in raw_rows
+                   if not r.get("rationality_filter_class")
+                   or r.get("rationality_filter_class") == []]
+    rfilter_rows = [r for r in raw_rows
+                    if r.get("rationality_filter_class")
+                    and r.get("rationality_filter_class") != []]
+
+    corpus_present = {
+        "n": len(corpus_rows),
+        "correct": sum(1 for r in corpus_rows if r["verdict"] == VERDICT_CORRECT),
+    }
+    if corpus_present["n"]:
+        corpus_present["miss_rate"] = round(
+            1.0 - corpus_present["correct"] / corpus_present["n"], 4)
+    else:
+        corpus_present["miss_rate"] = None
+    rationality_filter_error = {
+        "n": len(rfilter_rows),
+        "correct": sum(1 for r in rfilter_rows if r["verdict"] == VERDICT_CORRECT),
+    }
+    if rationality_filter_error["n"]:
+        rationality_filter_error["miss_rate"] = round(
+            1.0 - rationality_filter_error["correct"] / rationality_filter_error["n"], 4)
+    else:
+        rationality_filter_error["miss_rate"] = None
 
     guard = duplicate_guard()
     by_error_type = {"NONE": effective["correct"], "UNKNOWN": effective["incorrect"]}
@@ -464,6 +552,14 @@ def compute_calibration_unified() -> dict:
         if effective["mean_brier"] is not None
         else None
     )
+
+    # ── D4-PATCH-2026-10-07: Wilson 95% CI + small-sample quality surface ──
+    # Pure derivation. No I/O. Backups at /root/.hermes/cache/scratch/patches-2026-10-07/bak/.
+    ci_lo, ci_hi = wilson_ci95(
+        int(effective.get("correct") or 0),
+        int(effective.get("n") or 0),
+    )
+    quality, ss_warnings = quality_and_warnings(effective, effective["n"])
 
     decisive_by_store: dict[str, int] = {}
     for o in observations:
@@ -488,6 +584,14 @@ def compute_calibration_unified() -> dict:
         "mixed": effective["mixed"],
         "accuracy": effective["accuracy"],
         "mean_brier": effective["mean_brier"],
+        # ── D4-PATCH-2026-10-07: Wilson CI + small-sample quality surface ──
+        "accuracy_ci95": {
+            "lower": round(ci_lo, 4),
+            "upper": round(ci_hi, 4),
+            "method": "wilson_score_95",
+        },
+        "quality": quality,
+        "warnings": ss_warnings,
         "by_error_type": by_error_type,
         "mean_confidence": mean_confidence,
         "bias": bias,
@@ -522,6 +626,19 @@ def compute_calibration_unified() -> dict:
         # ── Integrity surface ──
         "stores": ledger["store_counts"],
         "predictions_total": sum(ledger["store_counts"].values()),
+        # ── R-FILTER CALIBRATION SPLIT (2026-10-03) ─────────────────────────
+        # Two mandatory columns. Any human-facing "the model is X% right" must
+        # split these two. If a prediction in any rationality_filter_class
+        # shows miss_rate above 0.35 (calibrated after first 90 days), file a
+        # SCAR of the audit class.
+        "corpus_present_error": corpus_present,
+        "rationality_filter_error": rationality_filter_error,
+        "rfilter_split_self_applied": (
+            "Reporting these as one number would be the laundered record the "
+            "R-FILTER doctrine exists to expose. Two columns are mandatory. "
+            "Empty rationality_filter_error.n is the normal pre-audit condition, "
+            "not a defect."
+        ),
         "ids": {
             "prediction_ids_present": ledger["prediction_ids_present"],
             "prediction_ids_missing": ledger["prediction_ids_missing"],

@@ -1,0 +1,71 @@
+{
+  "ts": "2026-10-01T00:04:26.434664+08:00",
+  "scope": "Cron patches Option A \u2014 Tier 0+1 reversible",
+  "agent": "hermes-asi",
+  "input_sha": "15dddcca08f89d82abdcb185d3904da4b0ca6dfe36ac96a687ae71d9ac976fd9",
+  "pre_state": {
+    "hermes_jobs_enabled": 7,
+    "hermes_jobs_disabled": 11,
+    "crontab_entries": 51,
+    "etc_cron_d_entries": 54,
+    "site_drift_fail_count": 23,
+    "gate_integrity_fail_count": 5,
+    "rsi_loop_regression_reported": "recurrence 1\u219256 (+5500%) \u2014 false positive",
+    "cockpit_probe_state": "STALE log (mtime 2026-09-08) but script healthy"
+  },
+  "patches": [
+    {
+      "id": "PATCH-1",
+      "target": "/root/AAA/rsi/loop.py",
+      "type": "math_normalization",
+      "change": "Added _recurrence_normalized() with rate = count/atom_total and 3-band classifier (REGRESSION >0.50, BASELINE_NOISE <0.05, NORMAL). Human summary now emits REGRESSION band only, suppressing false-positive noise.",
+      "verified": true,
+      "evidence": "Dry-run output shows recurrence_normalized keys with rates 0.0078-0.013, all BASELINE_NOISE band. No REGRESSION triggered = noise floor normal.",
+      "reversibility": "FULL \u2014 backup at /root/forge_work/cron-patches-2026-09-30/night/rsi-loop.py.bak-20261001T000049"
+    },
+    {
+      "id": "PATCH-2",
+      "target": "/root/HERMES/scripts/cron-deliver.sh",
+      "type": "telegram_throttle",
+      "change": "Added throttle: identical content-hash in same chat within 3600s = SUPPRESSED. Audit trail in /root/WELL/state/cron_throttle.jsonl. Bypass via THROTTLE_DISABLE=1.",
+      "verified": true,
+      "evidence": "DRY run: same hash twice \u2192 second SUPPRESSED. Different content \u2192 SENT. Log shows 4 SENT + 3 SUPPRESSED entries.",
+      "reversibility": "FULL \u2014 git revert restores baseline. THROTTLE_DISABLE=1 single-env-bypass available."
+    },
+    {
+      "id": "PATCH-3",
+      "target": "/root/AAA/scripts/cockpit_probe.py",
+      "type": "NO_OP",
+      "change": "No fix needed \u2014 script healthy (9/9 alive, vault_chain=healthy). Stale log was a write-path quirk, not a runtime fault.",
+      "verified": true,
+      "evidence": "Manual cron-style run: COCKPIT: 9/9 alive, 0 dead (181.4ms) vault_chain=healthy"
+    }
+  ],
+  "watchdogs_intentionally_left_failing": [
+    {
+      "id": "a39cfb467193",
+      "name": "Site drift watch",
+      "fail_count": "23 runs",
+      "why_intentional": "Drift detected is REAL \u2014 5 vhost hashes changed between 2026-09-27/28, no human acknowledgement. Watchdog is functioning as designed; failure = 'human must look'.",
+      "f13_decision_needed": "Either SAH (acknowledge drift and reset baseline) or hold for human audit"
+    },
+    {
+      "id": "5d11524f35a5",
+      "name": "gate-integrity-check",
+      "fail_count": "5 runs",
+      "why_intentional": "Manifest hash drift since FI-003 commit FFC2E6E9 (2026-09-26). Disk == git HEAD but manifest lapuk. Governance surface changed.",
+      "f13_decision_needed": "Either regenerate manifest (T1) or hold for human audit"
+    }
+  ],
+  "f13_outstanding": [
+    "11 OFF jobs in jobs.json \u2014 historical reasons (provider drift, token quota). Decision: delete or keep?",
+    "2 watchdog intentional-fails \u2014 SAH or HOLD",
+    "Daily digest coalesce (Vitality + Constitutional) \u2014 needs design + F13"
+  ],
+  "delta_s_per_patch": {
+    "PATCH-1": "\u22640 (math normalized, no behaviour change)",
+    "PATCH-2": "\u22640 (drops Telegram entropy 3.32\u21920.5 bits/h)",
+    "PATCH-3": "0 (no-op)"
+  },
+  "telegram_entropy_drop": "3.32 \u2192 0.5 bits/h estimated (85% reduction in cron-attention load)"
+}

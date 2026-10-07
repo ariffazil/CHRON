@@ -41,7 +41,7 @@ Without CHRON, agents make assertions without deadlines and evaluate models with
 
 ## Position in the Federation Flow
 
-CHRON operates between perceptual ingress ([HERMES](../HERMES)) and attention prioritization ([AAA](../AAA)), feeding time-calibrated expectations into the sovereign governance loop:
+CHRON operates between perceptual ingress ([HERMES](https://github.com/ariffazil/HERMES)) and attention prioritization ([AAA](https://github.com/ariffazil/AAA)), feeding time-calibrated expectations into the sovereign governance loop:
 
 ```mermaid
 flowchart TD
@@ -135,10 +135,10 @@ systemctl list-timers | grep chron
 
 ## Federation Integration & Flow
 
-- **Inbound from [HERMES](../HERMES):** Claims made in conversations or external reports are stamped with temporal horizons.
-- **Outbound to [AAA](../AAA):** Deadlines and attention debt feed directly into AAA's Attention formula `P = (Impact × Urgency × EvidenceQuality × Novelty) / AttentionCost`.
-- **Witnessed by [arifOS](../arifOS):** Calibration metrics provide empirical weights for constitutional floor F2 (`EVIDENCE_INTEGRITY`).
-- **Executed by [A-FORGE](../A-FORGE):** Automated verifiers run via governed cron jobs and background tasks.
+- **Inbound from [HERMES](https://github.com/ariffazil/HERMES):** Claims made in conversations or external reports are stamped with temporal horizons.
+- **Outbound to [AAA](https://github.com/ariffazil/AAA):** Deadlines and attention debt feed directly into AAA's Attention formula `P = (Impact × Urgency × EvidenceQuality × Novelty) / AttentionCost`.
+- **Witnessed by [arifOS](https://github.com/ariffazil/arifOS):** Calibration metrics provide empirical weights for constitutional floor F2 (`EVIDENCE_INTEGRITY`).
+- **Executed by [A-FORGE](https://github.com/ariffazil/A-FORGE):** Automated verifiers run via governed cron jobs and background tasks.
 
 ---
 

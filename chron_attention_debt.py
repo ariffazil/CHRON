@@ -307,6 +307,12 @@ def collect_unresolved_high_events() -> list[dict]:
         if target > now:
             continue
 
+        # Explicit event resolution (REALITY-CLOSURE-PROTOCOL v0.1, F13-ratified
+        # 2026-10-07): an event carrying a resolution record with evidence is
+        # discharged — reality already closed it; a debt label here would be stale.
+        if (event.get("resolution") or {}).get("evidence_ref"):
+            continue
+
         try:
             if _discharged_arrows(event.get("id")):
                 continue

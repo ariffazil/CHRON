@@ -1,0 +1,164 @@
+{
+  "ts": "2026-09-30T23:50:59.428941+08:00",
+  "scope": "ALL cron jobs in arifOS Federation",
+  "sources": {
+    "root_crontab": 51,
+    "etc_cron_d": 54,
+    "hermes_jobs_json": 18,
+    "etc_cron_daily_hourly_weekly_monthly": 13,
+    "total_estimate": 136
+  },
+  "hermes_jobs_breakdown": {
+    "enabled": 7,
+    "disabled": 11,
+    "agent_jobs": 10,
+    "script_jobs": 8,
+    "deliver_telegram": 16,
+    "deliver_local": 2
+  },
+  "six_crons_arif_noticed": [
+    {
+      "name": "arifos.floor.breach",
+      "freq": "5x dalam 6 jam",
+      "issue": "Dedup patched tapi masih spam"
+    },
+    {
+      "name": "RSI Exhale regression",
+      "freq": "setiap 6 jam",
+      "issue": "6 metrik beku \u2014 recurrence 1\u219228, 56, 17"
+    },
+    {
+      "name": "Drift Scanner",
+      "freq": "02:00 MYT",
+      "issue": "81% disk, Abang offer 18G"
+    },
+    {
+      "name": "Vitality Pulse",
+      "freq": "3x sehari",
+      "issue": "1\u00d7 STRAINED"
+    },
+    {
+      "name": "Constitutional Sync",
+      "freq": "07:00 MYT",
+      "issue": "Lapor fail tambah/buang"
+    },
+    {
+      "name": "Federation Pulse",
+      "freq": "setiap jam",
+      "issue": "Triple fidelity check"
+    }
+  ],
+  "failing_jobs": [
+    {
+      "id": "5d11524f35a5",
+      "name": "gate-integrity-check",
+      "fail_count": "5 runs in a row",
+      "status": "error",
+      "evidence": "Script exited with code 1 \u2014 GATE INTEGRITY DRIFT \u2014 enforcement surface changed after seal",
+      "script_path": "/root/HERMES/scripts/gate-integrity-verify.py",
+      "issue_class": "surface_drift_after_seal"
+    },
+    {
+      "id": "a39cfb467193",
+      "name": "\ud83d\udf02 Site drift watch \u2014 Caddy config + bundle pointer",
+      "fail_count": "23 runs in a row",
+      "status": "error",
+      "evidence": "SITE DRIFT DETECTED \u2014 CHANGED config mutated: /etc/caddy/vhosts/aaa.arif-fazil.com.conf 64fb0894c65d \u2192 2544ea4f471...",
+      "script_path": "/root/HERMES/scripts/constitutional-drift-watch.py",
+      "issue_class": "intentional_accountability_or_real_drift"
+    },
+    {
+      "id": "8b2ccdb9bce5",
+      "name": "agent-card-drift-check",
+      "status": "ok_with_warnings",
+      "verdict": "WARN",
+      "evidence": "40 unique cards, 35 with apex_zen, 19 WARN: 6 D1 (lane non-canon), 1 D4 (signature_legacy), 12 D6 (registry_receipt_hash present but registry_tool_count=0)",
+      "issue_class": "registry_truth_decay"
+    }
+  ],
+  "live_evidence_24h": {
+    "live_logs_count": 21,
+    "stale_logs": [
+      "/var/log/arifos/cockpit_probe.log (mtime 2026-09-08 \u2014 STALE 22 hari)"
+    ],
+    "dead_logs": [
+      "/var/log/entropy-governor.log (mtime 2026-07-17 \u2014 DEAD 105 hari)",
+      "/var/log/arifos/supply-chain-audit.log (size=0 \u2014 NEVER RAN)",
+      "/var/log/arifos/f13-packet.log (mtime 2026-09-29, size=0 \u2014 empty)",
+      "/var/log/arifos/cockpit_probe.log (size=0 \u2014 broken log)"
+    ],
+    "stuck_gate_vault": "vault: \u274c (200) di semua WITNESS calls \u2014 vault999 endpoint returning error",
+    "disk_pressure": "81% used (76G avail) / AAA=12G / .cache=34G / .hermes=8.9G"
+  },
+  "telegram_delivery_pile": {
+    "telegram_group_AAA_group": -1003753855708,
+    "deliveries_per_day_estimate": "60-100 mesej/hari",
+    "primary_delivery_target": "All federations cron \u2192 AAA group",
+    "noise_threshold_arif_attention": "stable \u22642/hr \u00b7 current rate ~5-10x"
+  },
+  "apex_compression": {
+    "F1_AMANAH": "Semua cron ada log \u2014 receipted",
+    "F2_TRUTH": "Drift fail = REAL drift, bukan false positive",
+    "F4_CLARITY": "Names konsisten (jitu-guard prefix)",
+    "F9_ANTI_HANTU": "Watchdog fail-by-design (T3) memaksa manusia lihat",
+    "F11_AUDITABILITY": "Semua ada log + receipt",
+    "F13_SOVEREIGN": "Arif tanya 'what these cron need' \u2014 itu human authority surface"
+  },
+  "rsi_regression_math": {
+    "metric": "capability.failure_surfacing",
+    "before": 1,
+    "after": 56,
+    "ratio": "+5500% over 14.6d",
+    "diagnosis": "BAD METRIC \u2014 denominator (capability atoms) inflated by classification noise; numerator (failure_surfacing) rose BECAUSE new surfaces added",
+    "explanation": "Jika baseline atom_count=85 dan 1 surfaced sebagai failure \u2192 rate=1/85=1.18%. Hari ni 56/86 \u2192 65%. Bukan regression, tu natural growth. Bug: RSI exhale tak normalize by atom count.",
+    "fix": "rsilver=recurrence/atom_count \u2014 formula yang normalized"
+  },
+  "entropy_metabolism": {
+    "disk_entropy": "\u0394S_disk = log2(81/70) \u2248 0.21 nats \u2014 boleh tekan (target \u226470%)",
+    "telegram_entropy": "\u0394S_telegram = log2(100/10) \u2248 3.32 bits per hour \u2014 Arif burnt 10x attention baseline",
+    "watchdog_entropy": "\u0394S_drift = log2(23/1) = 4.52 nats \u2014 single job emitting real entropy signal",
+    "signal_density": "0.04 signal bits / mesej (mostly noise)"
+  },
+  "improvements_recommendation": [
+    "1. TIER 0: Disk cleanup (-18G target: AAA=4G, .cache=8G, .hermes=2G)",
+    "2. TIER 1: Telegram delivery throttle \u2014 aggregate per job-class, once per hour ceiling",
+    "3. TIER 1: Normalize RSI metric \u2014 recurrence/atom_count instead of recurrence only",
+    "4. TIER 1: Fix vault999 witness endpoint \u2014 root cause of all 4/5 WITNESS calls",
+    "5. TIER 2: Disable 11 OFF jobs in jobs.json (delete entries not paused)",
+    "6. TIER 2: Convert 7 noisy LLM cron to script-only (gate-integrity, agent-card-drift, supply-chain, fed_retirement, fed_route_weights, mcp-health, capability-reprobe)",
+    "7. TIER 2: Coalesce Constitutional Sync + Vitality Pulse \u2192 single daily digest 07:30",
+    "8. TIER 3: agent-card WARN \u2014 6 D1 (non-canon lane) need F13 SAH untuk declare each non-canon lane",
+    "9. TIER 3: gate-integrity fail=5 \u2014 bukan cron fail, tu governance surface yang BERUBAH (T3, F13 SAH needed)",
+    "10. TIER 3: Site drift watch fail=23 \u2014 either accept (T3 design) or patch (T2)"
+  ],
+  "reality_graph_link": {
+    "node_cron_universe": "ALL cron jobs are signals into reality-graph",
+    "5_layers": [
+      "Layer 1 (Reality): \u2014 disk, vault, surface health",
+      "Layer 2 (Witness): \u2014 well, geox, wealth, arifos, vault (4/5 healthy)",
+      "Layer 3 (Capability): \u2014 FED sentinel, MCP census, capability-reprobe",
+      "Layer 4 (Consequence): \u2014 arifos.daily-probe, wealth-briefing, golden packet",
+      "Layer 5 (Authority): \u2014 constitution sync, SRO calibration, f13-weekly-packet, phoenix72"
+    ],
+    "missing_layer": "ALL cron are Layer 3-5 (capability/consequence/authority). Layer 1-2 (Reality+Witness) ada but NOT in cron \u2014 they're on-demand probes.",
+    "charted_pattern": "Cruise velocity = mean(inter-arrival of run_count)/sigma(success) \u2192 low cruise velocity \u2192 high noise"
+  },
+  "BIJAKSANA_evaluation": {
+    "verdict": "MIXED \u2014 real bugs + intentional design + signal-amplification",
+    "real_bugs": [
+      "cockpit_probe log empty",
+      "supply-chain-audit never ran",
+      "vault999 endpoint broken",
+      "RSI exhale metric formula wrong"
+    ],
+    "intentional_design": [
+      "Site drift watch fail-by-design (T3)",
+      "Constitutional sync self-asserting",
+      "agent-card-drift self-reporting"
+    ],
+    "signal_amplification": [
+      "Telegram delivery \u2192 AAA group \u2192 Arif DM \u2192 60+ mesej/hari"
+    ],
+    "next_step": "Run musyawarah on Tier 0 + Tier 1 ops, then apply patches"
+  }
+}

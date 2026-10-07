@@ -30,6 +30,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastmcp import FastMCP
 
+#: Event store used by chron_resolve_event (module constant: tests monkeypatch this).
+CHRON_EVENTS_STORE = Path("/root/AAA/scripts/chron_events.json")
+
 from chron.chron_store import (
     get_store,
     enforce_count_invariant,
@@ -724,6 +727,7 @@ def chron_index_resource() -> str:
                 "chron_reconcile_state",
                 "chron_record_verification",
                 "chron_resolve_unverifiable",
+                "chron_resolve_event",
                 "chron_store_stats",
                 "chron_temporal_briefing",
                 "chron_verified_predictions",
@@ -1084,6 +1088,97 @@ def chron_resolve_unverifiable(
         "prediction_id": prediction_id,
         "reason": reason,
         "claim": pred.get("claim"),
+        "query_time": _now_iso(),
+    }
+
+
+@mcp.tool()
+def chron_resolve_event(
+    event_id: str,
+    observed_outcome: str,
+    evidence_ref: str,
+) -> dict:
+    """Resolve a chron EVENT (not a prediction) with mandatory evidence.
+
+    Closes the event-closure gap (REALITY-CLOSURE-PROTOCOL v0.1, F13-ratified
+    2026-10-07): preregistration anchors and sovereign commitments mint no
+    predictions, so prediction-arrow discharge can never reach them. A resolved
+    event exits attention-debt minting but stays in the ledger (no delete).
+
+    Args:
+        event_id: Event id in chron_events.json.
+        observed_outcome: What actually happened (free text).
+        evidence_ref: File path, sha256, or receipt id — REQUIRED (F2).
+    """
+    if not (evidence_ref or "").strip():
+        return {
+            "_is_error": True,
+            "error_code": "EVIDENCE_REQUIRED",
+            "error": "chron_resolve_event requires evidence_ref (path, sha256, or receipt id)",
+            "query_time": _now_iso(),
+        }
+    events_path = CHRON_EVENTS_STORE
+    if not events_path.exists():
+        return {
+            "_is_error": True,
+            "error_code": "EVENTS_FILE_MISSING",
+            "error": f"{events_path} not found",
+            "query_time": _now_iso(),
+        }
+    data = json.loads(events_path.read_text())
+    events = data.get("events", [])
+    evt = next((e for e in events if e.get("id") == event_id), None)
+    if evt is None:
+        return {
+            "_is_error": True,
+            "error_code": "EVENT_NOT_FOUND",
+            "error": f"Event {event_id} not found",
+            "query_time": _now_iso(),
+        }
+    if evt.get("resolution"):
+        return {
+            "status": "ALREADY_RESOLVED",
+            "event_id": event_id,
+            "resolution": evt["resolution"],
+            "query_time": _now_iso(),
+        }
+    evt["resolution"] = {
+        "outcome": observed_outcome,
+        "evidence_ref": evidence_ref.strip(),
+        "resolved_at": _now_iso(),
+        "resolved_by": "chron_resolve_event",
+    }
+    tmp = events_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    tmp.replace(events_path)
+
+    # Close persisted OPEN debt items minted from this event. Append-only:
+    # rows flip OPEN -> RESOLVED with a resolution note; history is retained.
+    debt_closed, debt_error = [], None
+    try:
+        from chron.chron_attention_debt import _load_all_debt, _resolve_debt
+
+        for it in _load_all_debt():
+            if (
+                it.get("source") == "unresolved_event"
+                and it.get("ref_id") == event_id
+                and it.get("status") == "OPEN"
+            ):
+                if _resolve_debt(
+                    it.get("debt_id"),
+                    f"event resolved: {observed_outcome[:120]} | evidence: {evidence_ref[:120]}",
+                ):
+                    debt_closed.append(it.get("debt_id"))
+    except Exception as exc:  # event resolution already persisted — report, never hide
+        debt_error = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "status": "RESOLVED",
+        "event_id": event_id,
+        "resolution": evt["resolution"],
+        "debt_items_closed": debt_closed,
+        "debt_ledger_error": debt_error,
+        "note": "exits attention-debt minting; ledger retained (append-only discipline)",
         "query_time": _now_iso(),
     }
 
@@ -1562,6 +1657,10 @@ async def health(request):
                 "total_verified": calibration.get("total", 0),
                 "accuracy": calibration.get("accuracy"),
                 "mean_brier": calibration.get("mean_brier"),
+                # D4-PATCH-2026-10-07: surface Wilson CI + quality at /health.
+                "quality": calibration.get("quality"),
+                "accuracy_ci95": calibration.get("accuracy_ci95"),
+                "warnings": calibration.get("warnings", []),
             },
             "attention_debt": {
                 "total_ad": ad_summary.get("total_ad", 0),
