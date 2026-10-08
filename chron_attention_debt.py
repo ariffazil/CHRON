@@ -213,8 +213,35 @@ def _reconcile_open_items(open_items: list[dict]) -> list[dict]:
             if resolved:
                 continue
         if did and src == "unresolved_event":
-            # An event id is not a prediction id, so membership in `finished` can
-            # never match directly — the discharge runs through the arrow join.
+            # REALITY-CLOSURE-PROTOCOL v0.1 (F13 SAH 2026-10-07): an event
+            # with a resolution record carrying evidence_ref is closed in
+            # reality. A stale OPEN row in the JSONL predates that resolution
+            # (the collector ran before chron_resolve_event landed, or the
+            # chron-loop-closer re-minted the debt). The collector's own
+            # check (collect_unresolved_high_events line 313) excludes the
+            # event by reading the events file fresh, but the persisted row
+            # still lives in the JSONL and is promoted by the dedup step.
+            # Read the events file once, by ref_id, and resolve if closed.
+            try:
+                ev_path = EVENTS_FILE
+                ev_data = json.loads(ev_path.read_text())
+                ev_match = next(
+                    (e for e in ev_data.get("events", [])
+                     if e.get("id") == ref),
+                    None,
+                )
+            except Exception:
+                ev_match = None  # unreadable events file → keep claim (F2 fail-visible)
+            if ev_match and (ev_match.get("resolution") or {}).get("evidence_ref"):
+                resolved = _resolve_debt(
+                    did,
+                    f"auto-reconciled: event {ref} has resolution record with "
+                    f"evidence_ref in chron_events.json (REALITY-CLOSURE-PROTOCOL v0.1)",
+                )
+                if resolved:
+                    continue
+            # Fall through to the arrow join: even if the event has no
+            # explicit resolution, its bound predictions may be closed.
             try:
                 closed = _discharged_arrows(ref)
             except Exception:
