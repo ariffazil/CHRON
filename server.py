@@ -1515,7 +1515,9 @@ def chron_frame_witness(
     else:
         quality = "SPECULATIVE"
 
-    contradictions = [r.get("claim", "") for r in rows if r.get("status") == "CONTRADICTED"]
+    contradictions = [
+        r.get("claim", "") for r in rows if r.get("status") == "CONTRADICTED"
+    ]
     decided = n_verified + n_stale + n_contradicted + n_unverifiable
     confidence = round(n_verified / decided, 3) if decided else 0.0
 
@@ -1619,27 +1621,40 @@ def _get_active_events_summary() -> list[dict]:
 # ───────────────────────── HEALTH ─────────────────────────
 
 
+# ── /health aggregate cache (2026-10-15) ──────────────────────────────────
+# /health recomputed aggregates over ~194k episodes on every call (~800ms,
+# 900× slower than every other organ). Bounded fix: 60s TTL cache with honest
+# sensor labeling — payload carries served/computed_at/age_s so a cached read
+# can never be mistaken for a live one. Writers untouched (zero mutation risk).
+_HEALTH_CACHE: dict = {"ts": 0.0, "payload": None}
+
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request):
     """Health endpoint for federation probing."""
+    import time as _time
+
     from starlette.responses import JSONResponse
 
-    store = get_store()
-    preds = load_predictions()
-    calibration = compute_calibration()
-    active = get_active()
-    ledger = get_verified(limit=10000)
-    decisive = [v for v in ledger if _canonical_verdict(v) in _DECISIVE]
-    # Counted from the ledger, not from calibration: an explicitly closed-untestable
-    # arrow is finished-but-unscored and must never be conflated with a verifier's
-    # "evidence is late". Reading calibration here reported 0 for closures that existed.
-    awaiting = [v for v in ledger if _canonical_verdict(v) == VERDICT_UNVERIFIABLE]
-    closed_untestable = [v for v in ledger if _canonical_verdict(v) == VERDICT_CLOSED_UNTESTABLE]
+    _now = _time.time()
+    if _HEALTH_CACHE["payload"] is None or _now - _HEALTH_CACHE["ts"] > 60.0:
+        store = get_store()
+        preds = load_predictions()
+        calibration = compute_calibration()
+        active = get_active()
+        ledger = get_verified(limit=10000)
+        decisive = [v for v in ledger if _canonical_verdict(v) in _DECISIVE]
+        # Counted from the ledger, not from calibration: an explicitly closed-untestable
+        # arrow is finished-but-unscored and must never be conflated with a verifier's
+        # "evidence is late". Reading calibration here reported 0 for closures that existed.
+        awaiting = [v for v in ledger if _canonical_verdict(v) == VERDICT_UNVERIFIABLE]
+        closed_untestable = [
+            v for v in ledger if _canonical_verdict(v) == VERDICT_CLOSED_UNTESTABLE
+        ]
 
-    ad_summary = get_ad_summary()
+        ad_summary = get_ad_summary()
 
-    return JSONResponse(
-        {
+        payload = {
             "status": "ok",
             "organ": "CHRON",
             "port": int(os.environ.get("CHRON_MCP_PORT", 18102)),
@@ -1669,7 +1684,18 @@ async def health(request):
             },
             "query_time": _now_iso(),
         }
-    )
+        _HEALTH_CACHE["payload"] = payload
+        _HEALTH_CACHE["ts"] = _now
+        payload["cache"] = {"served": "live", "computed_at": payload["query_time"]}
+    else:
+        payload = dict(_HEALTH_CACHE["payload"])
+        payload["cache"] = {
+            "served": "cached",
+            "computed_at": _HEALTH_CACHE["payload"]["query_time"],
+            "age_s": round(_now - _HEALTH_CACHE["ts"], 1),
+        }
+
+    return JSONResponse(payload)
 
 
 # ───────────────────────── PROMPTS (Phase 4) ─────────────────────────
