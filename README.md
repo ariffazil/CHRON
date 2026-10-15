@@ -146,3 +146,18 @@ systemctl list-timers | grep chron
 
 AGPL-3.0 — arifOS Federation.
 DITEMPA BUKAN DIBERI.
+
+<!-- FEDERATION-STANDARD v2026-10-15 START :: 333-AGI audit :: source: organs.yaml + git + live probes :: regenerate: re-run audit -->
+## 🔗 Federation Identity (auto-audit 2026-10-15)
+| Field | Value |
+|---|---|
+| Organ | `chron` · METABOLISM · temporal_consequence_tracker |
+| Ports | 18102 (/mcp) |
+| Unit | chron-mcp.service |
+| Authority ceiling | COMPUTE_ONLY |
+| Live (SOT probe @audit) | UP (/health 0.76-1.59s, tiada cache @audit) |
+| Repo HEAD @audit | `7931573 2026-10-08` |
+| Public MCP | https://chron.arif-fazil.com/mcp |
+| Rollback | — |
+| Flow graph | [FEDERATION-FLOW-GRAPH.md](../FEDERATION-FLOW-GRAPH.md) — peta semua organ + repo |
+<!-- FEDERATION-STANDARD v2026-10-15 END -->
