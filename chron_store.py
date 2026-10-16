@@ -135,14 +135,14 @@ class ChronStore:
         self.store_dir.mkdir(parents=True, exist_ok=True)
 
     def _load_index(self):
-        """Rebuild index from JSONL if index missing or stale."""
-        if self.index_file.exists():
-            try:
-                self._index = json.loads(self.index_file.read_text())
-                return
-            except Exception:
-                pass
-        # Rebuild from JSONL
+        """Rebuild index from JSONL on load — JSONL is the source of truth.
+
+        The index.json on disk is a write-time cache that lags every append
+        (append() updates the in-memory index but defers the disk write per
+        Phase 0). Trusting it on restart served stale query() results (missing
+        the newest episodes). Rebuild fresh from JSONL so query()/latest() are
+        correct after restart. Repair receipt: 2026-10-16 CHRON index-lag fix.
+        """
         self._rebuild_index()
 
     def _rebuild_index(self):
