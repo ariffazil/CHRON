@@ -61,7 +61,7 @@
 
   <!-- Lessons loop back -->
   <g stroke="#5a6270" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#ah)" fill="none">
-    <path d="M1080,282 C1080,236 200,236 200,286"/>
+    <path d="M1080,300 C1080,244 200,244 200,300"/>
   </g>
   <text x="640" y="228" fill="#9aa4b2" font-size="15" text-anchor="middle">lessons feed the next prediction · learning loop closes</text>
 
