@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" font-family="DejaVu Sans, Liberation Sans, sans-serif">
+  <defs>
+    <marker id="ah" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#5a6270"/>
+    </marker>
+    <marker id="ahc" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#4fd1c5"/>
+    </marker>
+    <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b1e24"/>
+      <stop offset="1" stop-color="#14161a"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#fade)"/>
+  <g stroke="#232830" stroke-width="1">
+    <line x1="0" y1="260" x2="1280" y2="260"/><line x1="0" y1="460" x2="1280" y2="460"/>
+    <line x1="320" y1="0" x2="320" y2="640"/><line x1="960" y1="0" x2="960" y2="640"/>
+  </g>
+
+  <!-- Title -->
+  <text x="60" y="104" fill="#f2f4f7" font-size="58" font-weight="700">CHRON</text>
+  <text x="60" y="146" fill="#4fd1c5" font-size="22" letter-spacing="6">DEMI MASA · TIME IS THE WITNESS</text>
+  <text x="60" y="184" fill="#9aa4b2" font-size="18">what did we expect · what happened · were we wrong</text>
+
+  <!-- Stage cards -->
+  <g>
+    <rect x="60" y="300" width="280" height="130" rx="14" fill="#1d2229" stroke="#4fd1c5" stroke-width="2"/>
+    <text x="200" y="352" fill="#f2f4f7" font-size="25" font-weight="700" text-anchor="middle">PREDICTION</text>
+    <text x="200" y="386" fill="#9aa4b2" font-size="17" text-anchor="middle">falsifiable · probability</text>
+    <text x="200" y="410" fill="#9aa4b2" font-size="17" text-anchor="middle">+ verification window</text>
+
+    <rect x="500" y="300" width="280" height="130" rx="14" fill="#1d2229" stroke="#4fd1c5" stroke-width="2"/>
+    <text x="640" y="352" fill="#f2f4f7" font-size="25" font-weight="700" text-anchor="middle">VERIFICATION</text>
+    <text x="640" y="386" fill="#9aa4b2" font-size="17" text-anchor="middle">window closes ·</text>
+    <text x="640" y="410" fill="#9aa4b2" font-size="17" text-anchor="middle">reality checked</text>
+
+    <rect x="940" y="300" width="280" height="130" rx="14" fill="#1d2229" stroke="#4fd1c5" stroke-width="2"/>
+    <text x="1080" y="352" fill="#f2f4f7" font-size="25" font-weight="700" text-anchor="middle">CALIBRATION</text>
+    <text x="1080" y="386" fill="#9aa4b2" font-size="17" text-anchor="middle">Brier score ·</text>
+    <text x="1080" y="410" fill="#9aa4b2" font-size="17" text-anchor="middle">drift tracked</text>
+  </g>
+
+  <!-- Arrows between stages -->
+  <g stroke="#5a6270" stroke-width="2.5" marker-end="url(#ah)">
+    <line x1="342" y1="365" x2="492" y2="365"/>
+    <line x1="782" y1="365" x2="932" y2="365"/>
+  </g>
+
+  <!-- Arrow of time -->
+  <g>
+    <line x1="60" y1="492" x2="1180" y2="492" stroke="#4fd1c5" stroke-width="3" marker-end="url(#ahc)"/>
+    <g stroke="#4fd1c5" stroke-width="1.5">
+      <line x1="200" y1="484" x2="200" y2="500"/>
+      <line x1="640" y1="484" x2="640" y2="500"/>
+      <line x1="1080" y1="484" x2="1080" y2="500"/>
+    </g>
+    <text x="1200" y="484" fill="#4fd1c5" font-size="16" font-weight="700">t</text>
+    <text x="60" y="528" fill="#9aa4b2" font-size="15">the arrow of time · expectations are held accountable against observed reality</text>
+  </g>
+
+  <!-- Lessons loop back -->
+  <g stroke="#5a6270" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#ah)" fill="none">
+    <path d="M1080,298 C1080,240 200,240 200,286"/>
+  </g>
+  <text x="640" y="228" fill="#9aa4b2" font-size="15" text-anchor="middle">lessons feed the next prediction · learning loop closes</text>
+
+  <!-- Footer -->
+  <text x="60" y="606" fill="#9aa4b2" font-size="17">computes and records · never judges · never executes · never seals</text>
+  <text x="1220" y="606" fill="#4fd1c5" font-size="16" letter-spacing="3" text-anchor="end">DITEMPA BUKAN DIBERI</text>
+</svg>
