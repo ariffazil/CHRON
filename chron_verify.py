@@ -30,7 +30,7 @@ from chron.chron_episode import verify_from_result
 from chron.chron_store import get_store
 
 MYT = timezone(timedelta(hours=8))
-CHRON_EVENTS = Path("/root/AAA/scripts/chron_events.json")
+CHRON_EVENTS = Path("/root/chron/chron_events.json")
 VERIFICATION_LOG = Path("/root/chron/data/verification_log.jsonl")
 # Attempt log is deliberately SEPARATE from the canonical verification log.
 # 2026-09-18 repair (D4): two writers with two different schemas were appending

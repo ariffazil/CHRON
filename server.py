@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastmcp import FastMCP
 
 #: Event store used by chron_resolve_event (module constant: tests monkeypatch this).
-CHRON_EVENTS_STORE = Path("/root/AAA/scripts/chron_events.json")
+CHRON_EVENTS_STORE = Path("/root/chron/chron_events.json")
 
 from chron.chron_store import (
     get_store,
@@ -250,7 +250,7 @@ def chron_active_events(audience: AudienceFilter = AudienceFilter.all) -> dict:
     validation. Previously 'GARBAGE' silently returned the 'both' subset —
     a privacy bug. Now such requests are rejected at the protocol boundary.
     """
-    chron_events = Path("/root/AAA/scripts/chron_events.json")
+    chron_events = Path("/root/chron/chron_events.json")
     if not chron_events.exists():
         return {"events": [], "count": 0, "query_time": _now_iso()}
 
@@ -286,7 +286,7 @@ def _resolve_prediction_audience(pred: dict) -> str:
 
     receipt rcpt-2026-09-19-chron-audience-leak-fix
     evidence /root/chron/data/predictions.jsonl  (live store, read-only)
-    evidence /root/AAA/scripts/chron_events.json (event store, read-only)
+    evidence /root/chron/chron_events.json (event store, read-only)
 
     Resolution order:
       1. explicit `audience` on the prediction row
@@ -299,7 +299,7 @@ def _resolve_prediction_audience(pred: dict) -> str:
     sid = pred.get("source_id")
     if sid:
         try:
-            data = json.loads(Path("/root/AAA/scripts/chron_events.json").read_text())
+            data = json.loads(Path("/root/chron/chron_events.json").read_text())
             for e in data.get("events", []):
                 if e.get("id") == sid and e.get("audience") in ("arif", "syed", "both"):
                     return e["audience"]
@@ -748,7 +748,7 @@ def chron_index_resource() -> str:
                 "/calibrate",
                 "/audit",
             ],
-            "event_store_path": "/root/AAA/scripts/chron_events.json",
+            "event_store_path": "/root/chron/chron_events.json",
             "generation": STORE_GENERATION,
             "queried_at": _now_iso(),
         },
@@ -780,7 +780,7 @@ def chron_events_upcoming_resource() -> str:
     """
     Upcoming chron_events with target_date — the institution's known future.
     """
-    chron_events = Path("/root/AAA/scripts/chron_events.json")
+    chron_events = Path("/root/chron/chron_events.json")
     if not chron_events.exists():
         return json.dumps({"events": [], "count": 0, "queried_at": _now_iso()})
     data = json.loads(chron_events.read_text())
@@ -1223,7 +1223,7 @@ def chron_create_event(
             cannot tell a 0.25 claim from a 0.55 claim. Omit for non-forecast
             events (birthdays, deadlines, fiscal windows).
     """
-    chron_events_path = Path("/root/AAA/scripts/chron_events.json")
+    chron_events_path = Path("/root/chron/chron_events.json")
     if not chron_events_path.exists():
         return {"error": "chron_events.json not found", "query_time": _now_iso()}
 
@@ -1590,7 +1590,7 @@ def _get_last_loop() -> dict | None:
 
 def _get_active_events_summary() -> list[dict]:
     """Get condensed active events for briefing."""
-    chron_events = Path("/root/AAA/scripts/chron_events.json")
+    chron_events = Path("/root/chron/chron_events.json")
     if not chron_events.exists():
         return []
     data = json.loads(chron_events.read_text())

@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Optional
 
 DEBT_FILE = Path("/root/chron/data/attention_debt.jsonl")
-EVENTS_FILE = Path("/root/AAA/scripts/chron_events.json")
+EVENTS_FILE = Path("/root/chron/chron_events.json")
 
 CONSEQUENCE_WEIGHT = {"HIGH": 3.0, "MEDIUM": 2.0, "LOW": 1.0}
 DEFAULT_WEIGHT = 2.0

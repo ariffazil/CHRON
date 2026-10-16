@@ -1058,7 +1058,7 @@ def generate_from_chron_events() -> list[dict]:
     generator read neither file: OUTCOME→LEARNING wrote them and nothing read them
     — a ledger, not a loop.
     """
-    chron_events = Path("/root/AAA/scripts/chron_events.json")
+    chron_events = Path("/root/chron/chron_events.json")
     if not chron_events.exists():
         return []
 
