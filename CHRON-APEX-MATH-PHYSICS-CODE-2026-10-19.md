@@ -2,6 +2,8 @@
 ### 2026-10-19 · 333-AGI · status: synthesis, not new canon
 
 > **Epistemic banner.** APEX THEORY: HOLD as scientific theory, SEAL as governance research programme, PARTIAL as operational architecture, VOID as “unifies all knowledge”. Physics below is an **explanatory lens**, not a claim that APEX is physics. CHRON numbers are OBS from the 2026-10-19 audit. Proposed scores (`G_chron`, `C_dark_chron`) are **DRAFT/SPEC**, not APEX canon.
+>
+> **Classification note (per arifOS README):** CHRON is a **boundary service** (`:18102`), not an organ. HERMES (`:18087`) is the semantic boundary service. “Temporal witness” names CHRON’s function; “boundary service” is the federation contract label. The systemd description still says “organ” — that is label drift, not authority.
 
 ---
 
