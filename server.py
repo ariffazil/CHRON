@@ -44,6 +44,7 @@ from chron.chron_prediction import (
     get_due,
     get_verified,
     compute_calibration,
+    save_calibration,
     load_predictions,
     generate_from_chron_events,
     resolved_ids,
@@ -572,6 +573,19 @@ def chron_record_verification(
     # Persist to verification_log.jsonl (APPEND-ONLY)
     _append_verification_record(verif_record)
 
+    # Keep the declared single source of truth (data/calibration.json) in step
+    # with the ledger. Before this, only the scheduled verifier wrote the file;
+    # a manual MCP verification left it stale while /health computed live
+    # (measured 2026-10-19: file n=35, live n=38). Never fail the verdict if the
+    # cache write fails — report it on the record instead.
+    calibration_synced = False
+    calibration_error = None
+    try:
+        save_calibration(compute_calibration())
+        calibration_synced = True
+    except Exception as exc:
+        calibration_error = f"{type(exc).__name__}: {exc}"
+
     # Create verify episode
     store = get_store()
     error = 0.0 if correct else 1.0
@@ -598,6 +612,8 @@ def chron_record_verification(
         "observed_outcome": observed_outcome,
         "brier_score": verif_record["brier_score"],
         "verdict": verif_record["verdict"],
+        "calibration_synced": calibration_synced,
+        "calibration_error": calibration_error,
         "query_time": _now_iso(),
     }
 
