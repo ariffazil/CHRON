@@ -55,11 +55,11 @@ Define the CHRON operator:
 C : Event × Evidence × Time  →  Record × Score × Lesson
 ```
 
-It is a **witness operator**, not a decision operator. Its outputs are evidence for the Kernel, never a constitutional verdict.
+It is a **witness operator**, not a decision operator. Its outputs are **outcome-resolution labels** (`VERIFIED_CORRECT`, `VERIFIED_INCORRECT`, `UNVERIFIABLE`, `CLOSED_UNTESTABLE`) and scores — evidence for the Kernel. It never issues a constitutional authorization verdict.
 
 | APEX | CHRON construct | Math object | Code |
 |---|---|---|---|
-| **A / AKAL** | Brier score, calibration, bias δ, unknown share, shrinkage | proper scoring rule; empirical Bayes | `compute_brier`, `compute_calibration_unified`, `recalibrate_confidence` |
+| **A / AKAL** | Brier score, calibration, bias δ, unknown share, shrinkage | proper scoring rule; Beta–Binomial-style recalibration heuristic | `compute_brier`, `compute_calibration_unified`, `recalibrate_confidence` |
 | **P / PRESENT×AUTHORITY** | birth record immutable; verification separate; `audience`; `evidence_ref`; F13 resolution | bitemporal state; append-only event log | `create_prediction`, `chron_record_verification`, `chron_resolve_event` |
 | **E / ENTROPY×ENERGY** | attention debt; episode growth; storage; closure | aging backlog `AD(t)`; record entropy | `chron_attention_debt`, `episodes.jsonl`, `data/*.jsonl` |
 | **X / EXPLORATION×AMANAH** | hypotheses, FRAME witness, dignity lanes, refusal to fake closure | independence; quotient by observation | `chron_frame_witness`, `chron_proxy_reality_*`, `UNVERIFIABLE` |
@@ -98,9 +98,11 @@ E[B] = c²(1 − q) + (1 − c)² q
 dE/dc = 2c − 2q = 0  →  c = q
 ```
 
-Truthful confidence minimizes expected loss. This is the mathematical reason CHRON can score belief **without a judge**: the scoring rule, not an authority, prices the claim. Brier is bounded `[0,1]`; 0.25 is the uninformed baseline; lower is better. Log loss `−ln p` is also proper but unbounded and punishes confident errors harder; Brier is the right choice for a young store with small n.
+Truthful confidence minimizes expected loss. This is the mathematical reason CHRON can score belief **without a judge**: the scoring rule, not an authority, prices the claim. Brier is bounded `[0,1]`; **0.25 is the score of a constant-0.5 forecast, not a universal “uninformed” baseline** — a base-rate reference can score differently on the same outcomes. Compare skill against an appropriate reference. Log loss `−ln p` is also proper but unbounded and punishes confident errors harder; Brier is the right choice for a young store with small n.
 
-### 4.2 Empirical-Bayes shrinkage — the humility operator (F7)
+**Brier prices forecast error; it does not authenticate the evidence.** The chain is `claim → admissible observation → justified outcome label y → Brier`. If `y` is wrong, an impeccable scoring rule scores against the wrong target.
+
+### 4.2 Beta–Binomial-style recalibration heuristic — the humility operator (F7)
 
 With `m` interpretable decisive outcomes, `κ = 8` pseudo-observations of doubt:
 
@@ -112,7 +114,7 @@ anchor = accuracy ā        if skill usable
 c_cal  = clamp01( (1 − w)·p + w·anchor − w·δ_eff )
 ```
 
-`w = m/(m+κ)` is the Beta–Binomial posterior weight; the posterior mean after `m` observations with `k` hits is `(k+α)/(m+κ) = w·(k/m) + (1−w)·μ₀`. `κ=8` means: at `m=2`, `w=0.20` — four-fifths of the proposal survives. `MIN_EFFECTIVE_N=8`; `UNKNOWN` share > 0.5 or blind-lesson share > 0.5 makes the store **INSUFFICIENT**, not “accurate”. Live: n=38, accuracy 0.805, Brier 0.172, bias positive → proposals are shrunk (e.g. 0.95 → 0.678).
+`w = m/(m+κ)` is the Beta–Binomial posterior weight; the posterior mean after `m` observations with `k` hits is `(k+α)/(m+κ) = w·(k/m) + (1−w)·μ₀`. **But the full operator is not a posterior**: it adds a proposal `p`, a skill-dependent anchor, a bias subtraction, and clipping. The defensible label is a **recalibration heuristic with Beta–Binomial-style weighting**, not an empirical-Bayes posterior. `κ=8` means: at `m=2`, `w=0.20` — four-fifths of the proposal survives. `MIN_EFFECTIVE_N=8`; `UNKNOWN` share > 0.5 or blind-lesson share > 0.5 makes the store **INSUFFICIENT**, not “accurate”. Live: n=38, accuracy 0.805, Brier 0.172, bias positive → proposals are shrunk (e.g. 0.95 → 0.678).
 
 ### 4.3 Observation-level quotient (R2)
 
@@ -126,6 +128,8 @@ observation_key = price|instrument|source|value|time
 ```
 
 The calibration sample is the quotient set `O/~`; `n_eff = |O/~|`. This prevents one price print from occupying two slots in the accuracy ratio. It is why `raw.n=46` can collapse to `effective_n=38` while `verified` predictions remain 44: **predictions are hypotheses; observations are the unit of evidence**.
+
+**Exact retention rule:** one group per `observation_key`. Group class is `CORRECT` if all members are correct, `INCORRECT` if none are, `MIXED` otherwise. `hit_rate = hits / n_hypotheses`; `accuracy = mean(group hit_rate)`; group `brier_score = mean(member Brier)`. All member verdicts remain in `members`; the raw view retains the naive per-row counts. This is **deduplication under the key**, not proof of statistical independence. A mixed group is a `MIXED` observation, not a silent exclusion.
 
 ### 4.4 Resolution state machine / poset
 
@@ -272,6 +276,8 @@ CHRON is **temporal witness**, adjacent to VAULT999 and FRAME. It is not Judge, 
 
 **FRAME is the witness to the witness.** CHRON owns the temporal ledger; FRAME sits outside it and mechanically checks pointed claims (`file_exists`, `file_fresh`, `json_field`) without executing commands or issuing verdicts. CHRON verification records now carry `witness_status` (`UNWITNESSED` / `PENDING` / `WITNESSED`), `witness_verdict`, and `witness_result_id`. The bridge is live and traceable; it is **not** mandatory. A witness that can be skipped is an available separation, not an enforced one.
 
+**FRAME is not the X dial — INT, not canon.** APEX assigns **X = EXPLORATION × AMANAH** with floors F3 TRI-WITNESS, F6 EMPATHY/MARUAH, F8 GENIUS, F9 ANTIHANTU. FRAME can measure one coordinate of X — witness independence — but X also includes dignity, genius, and anti-hantu constraints. Mapping an organ to a dial is a category error: an organ is an instrument; a dial is a constitutional dimension. `X_c` is therefore a **vector**, not a scalar, until a scalarization rule is defined. FRAME’s existence does not instrument X; it instruments one component. The claim “FRAME is X” is an overclaim.
+
 ### 7.2 Verdict category separation
 
 | CHRON | Constitutional analog | What it is NOT |
@@ -299,13 +305,13 @@ Collapsing these is the APEX error of **Judge + Witness fusion** (HARAM). A cali
 
 ## 8. Falsifiable tests for this mapping
 
-1. **Proper scoring:** if Brier is proper, truthful confidence should minimize expected loss on held-out claims. Test: compare Brier of stated confidence vs systematically shifted confidence.
-2. **Shrinkage:** if κ=8 is conservative, calibrated confidence should move toward accuracy without collapsing discrimination. Test: reliability curve before/after; live shift 0.95→0.678 is a single case, not proof.
-3. **R2 quotient:** if observation-level counting is correct, collapsing duplicates should reduce n without materially changing accuracy. Test: raw vs effective on the same ledger.
-4. **Calibration parity:** after every verification, `calibration.json.total == /health.calibration.total_verified`. Test: assert in CI; the 35 vs 38 bug is the counterexample.
-5. **Closure vs debt:** closing N stale items should reduce AD slope. Observed: 58.4→0.
-6. **Witness independence:** if FRAME-witnessed verifications are more reliable, their Brier should be lower than self-witnessed ones at sufficient n. Not yet testable — `X_c` is uninstrumented.
-7. **G_chron:** if adopted, high `A_c` with low `P_c` and low `X_c` should predict failures better than `A_c` alone. Test only after `X_c` exists.
+1. **Proper scoring (empirical):** shifting confidence and comparing scores tests the shifts, not the expected-loss proof. The proof stands independently; the test measures calibration behavior.
+2. **Shrinkage (heuristic):** if κ=8 is conservative, calibrated confidence should move toward accuracy without collapsing discrimination. This tests the heuristic, not a posterior derivation. Live 0.95→0.678 is one case, not proof.
+3. **R2 quotient (dedup):** collapsing duplicate observations should reduce n without materially changing accuracy. This establishes deduplication under `observation_key`, not statistical independence.
+4. **Calibration parity (consistency):** after every verification, `calibration.json.total == /health.calibration.total_verified`. This tests agreement between two views, not that the underlying outcome labels are correct. The 35 vs 38 bug is the counterexample.
+5. **Closure vs debt (backlog response):** closing N stale items should reduce AD slope. Observed 58.4→0. This does not independently show the closures were justified; that requires the evidence chain.
+6. **Witness independence (association):** if FRAME-witnessed verifications are more reliable, their Brier should be lower than self-witnessed ones at sufficient n. This is an association, not causation: the claims in the two groups may differ. Not testable until `X_c` has a measured component.
+7. **G_chron (predictive validity):** if adopted, high `A_c` with low `P_c` and low `X_c` should predict failures better than `A_c` alone. This tests the proposed diagnostic, not APEX canon; only after `X_c` exists.
 
 ---
 

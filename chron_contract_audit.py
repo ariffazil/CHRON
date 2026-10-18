@@ -33,6 +33,7 @@ from collections import Counter
 from pathlib import Path
 
 PREDICTIONS = Path("/root/chron/data/predictions.jsonl")
+VERIFICATIONS = Path("/root/chron/data/verification_log.jsonl")
 OUT = Path("/root/chron/data/contract_audit.json")
 
 ABSENCE_RE = re.compile(r"\b(no|not|zero|absent|never|without|fails? to)\b", re.I)
@@ -214,6 +215,24 @@ def audit() -> dict:
         if line.strip()
     ]
     items = [classify(r) for r in rows]
+
+    # Verification provenance is a separate surface from prediction contracts.
+    # Historical records predate the resolution block; report ABSENT rather
+    # than imputing completeness.
+    ver_rows = (
+        [
+            json.loads(line)
+            for line in VERIFICATIONS.read_text().splitlines()
+            if line.strip()
+        ]
+        if VERIFICATIONS.exists()
+        else []
+    )
+    verification_provenance = Counter(
+        (r.get("resolution") or {}).get("completeness", "ABSENT") for r in ver_rows
+    )
+    witness_status = Counter(r.get("witness_status", "ABSENT") for r in ver_rows)
+
     summary = {
         "total": len(items),
         "by_contract": dict(Counter(i["contract_status"] for i in items)),
@@ -226,6 +245,9 @@ def audit() -> dict:
         "coverage_required": sum(1 for i in items if i["coverage_required"]),
         "coverage_specified": sum(1 for i in items if i["coverage_specified"]),
         "decision_time": dict(Counter(i["decision_time"] for i in items)),
+        "verification_rows": len(ver_rows),
+        "verification_provenance": dict(verification_provenance),
+        "witness_status": dict(witness_status),
     }
     report = {"summary": summary, "items": items}
     OUT.parent.mkdir(parents=True, exist_ok=True)

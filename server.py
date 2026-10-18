@@ -523,6 +523,14 @@ def chron_record_verification(
     observed_outcome: str,
     correct: bool,
     witness_claim_id: str = "",
+    criterion: str = "",
+    evidence_ref: str = "",
+    outcome_time: str = "",
+    observation_time: str = "",
+    coverage: str = "",
+    entailment: str = "",
+    resolver_id: str = "",
+    resolver_relation: str = "",
 ) -> dict:
     """Record a verification outcome for a prediction. CLOSES THE ARROW.
 
@@ -546,6 +554,14 @@ def chron_record_verification(
         observed_outcome: What actually happened (free text — becomes evidence)
         correct: True if prediction was correct, False if incorrect
         witness_claim_id: optional claim_id returned by chron_frame_witness
+        criterion: the original criterion being tested (text or field path)
+        evidence_ref: file path, URL, receipt id, or measurement identifier
+        outcome_time: when the event happened (ISO-8601)
+        observation_time: when the evidence became available (ISO-8601)
+        coverage: measurement window / limitations for absence claims
+        entailment: why this evidence entails YES or NO
+        resolver_id: who/what applied the criterion
+        resolver_relation: independent | same_agent | human_witness | machine_probe
 
     Returns:
         Verification record with Brier score, verdict, and verification_id.
@@ -603,6 +619,29 @@ def chron_record_verification(
     verif_record["witness_verdict"] = witness_verdict
     verif_record["witness_result_id"] = witness_result_id
 
+    # Resolution provenance: a verdict is only auditable if a later reader can
+    # see what criterion was tested, which evidence was used, when reality
+    # changed vs when it was observed, and who applied the criterion. These
+    # fields are optional for backward compatibility; completeness is reported
+    # rather than assumed.
+    resolution = {
+        "criterion": criterion,
+        "evidence_ref": evidence_ref,
+        "outcome_time": outcome_time,
+        "observation_time": observation_time,
+        "coverage": coverage,
+        "entailment": entailment,
+        "resolver_id": resolver_id,
+        "resolver_relation": resolver_relation,
+    }
+    required = ("criterion", "evidence_ref", "entailment", "resolver_id")
+    resolution["completeness"] = (
+        "COMPLETE"
+        if all(str(resolution.get(k, "")).strip() for k in required)
+        else "PARTIAL"
+    )
+    verif_record["resolution"] = resolution
+
     # Persist to verification_log.jsonl (APPEND-ONLY)
     _append_verification_record(verif_record)
 
@@ -648,6 +687,7 @@ def chron_record_verification(
         "witness_status": witness_status,
         "witness_verdict": witness_verdict,
         "witness_claim_id": witness_claim_id or None,
+        "resolution": resolution,
         "calibration_synced": calibration_synced,
         "calibration_error": calibration_error,
         "query_time": _now_iso(),
