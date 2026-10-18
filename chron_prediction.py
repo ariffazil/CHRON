@@ -969,8 +969,24 @@ def recalibrate_confidence(
     calibrated = _clamp01(p + shift)
 
     if not skill_usable:
+        # Name the actual failing condition. The old string said
+        # "n=... < 8 and/or error taxonomy blind" even when n was 38 and the
+        # real blocker was blind lesson share. A reason must not misdiagnose.
+        reasons = []
+        if n < min_effective_n:
+            reasons.append(f"n={n} < {min_effective_n}")
+        unknown_share = facts.get("unknown_share")
+        if unknown_share is not None and unknown_share > MAX_UNKNOWN_SHARE:
+            reasons.append(f"unknown_share={unknown_share:.3f} > {MAX_UNKNOWN_SHARE}")
+        blind_share = facts.get("blind_lesson_share")
+        if blind_share is not None and blind_share > MAX_BLIND_LESSON_SHARE:
+            reasons.append(
+                f"blind_lesson_share={blind_share:.3f} > {MAX_BLIND_LESSON_SHARE}"
+            )
+        if not reasons:
+            reasons.append("skill not usable")
         why = (
-            f"INSUFFICIENT (n={n} < {min_effective_n} and/or error taxonomy blind); "
+            f"INSUFFICIENT ({'; '.join(reasons)}); "
             f"anchored on genuine uncertainty 0.5, measured bias direction applied "
             f"at evidence weight {w:.4f}"
         )
