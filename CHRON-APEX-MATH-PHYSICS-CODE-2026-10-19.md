@@ -270,6 +270,8 @@ Witness (VAULT999) ── immutable record
 
 CHRON is **temporal witness**, adjacent to VAULT999 and FRAME. It is not Judge, not Executor, not Reflex. Its `VERIFIED_CORRECT` is **evidence**, not a constitutional SEAL.
 
+**FRAME is the witness to the witness.** CHRON owns the temporal ledger; FRAME sits outside it and mechanically checks pointed claims (`file_exists`, `file_fresh`, `json_field`) without executing commands or issuing verdicts. CHRON verification records now carry `witness_status` (`UNWITNESSED` / `PENDING` / `WITNESSED`), `witness_verdict`, and `witness_result_id`. The bridge is live and traceable; it is **not** mandatory. A witness that can be skipped is an available separation, not an enforced one.
+
 ### 7.2 Verdict category separation
 
 | CHRON | Constitutional analog | What it is NOT |

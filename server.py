@@ -522,6 +522,7 @@ def chron_record_verification(
     prediction_id: str,
     observed_outcome: str,
     correct: bool,
+    witness_claim_id: str = "",
 ) -> dict:
     """Record a verification outcome for a prediction. CLOSES THE ARROW.
 
@@ -532,6 +533,11 @@ def chron_record_verification(
     whether the prediction was correct or incorrect. CHRON then computes
     the Brier score and writes a permanent verification record.
 
+    FRAME is NOT called automatically. To mark a verification as independently
+    witnessed, run chron_frame_witness first and pass its claim_id here. Without
+    it the verification is recorded as UNWITNESSED; with an unknown id it is
+    recorded as PENDING. This is a separation-of-powers marker, not a gate.
+
     After calling this, call chron_calibration_state() to see updated
     calibration, and chron_lessons() to check for extractable lessons.
 
@@ -539,6 +545,7 @@ def chron_record_verification(
         prediction_id: The prediction to verify (e.g. 'pred-b73cba59ab86')
         observed_outcome: What actually happened (free text — becomes evidence)
         correct: True if prediction was correct, False if incorrect
+        witness_claim_id: optional claim_id returned by chron_frame_witness
 
     Returns:
         Verification record with Brier score, verdict, and verification_id.
@@ -569,6 +576,32 @@ def chron_record_verification(
 
     # Build verification record (does NOT mutate original prediction)
     verif_record = verify_prediction(pred, observed_outcome, correct)
+
+    # Separation-of-powers marker: a verification is UNWITNESSED unless the
+    # caller links a FRAME claim_id. The witness is not called automatically
+    # because most observed_outcome text has no pointed evidence for FRAME to
+    # check; claiming otherwise would turn a manual bridge into a fake gate.
+    witness_status = "UNWITNESSED"
+    witness_verdict = None
+    witness_result_id = None
+    if witness_claim_id:
+        matches = [
+            r
+            for r in fw_results(witness_claim_id)
+            if r.get("claim_id") == witness_claim_id
+        ]
+        if matches:
+            latest = matches[-1]
+            witness_status = "WITNESSED"
+            witness_verdict = latest.get("verdict")
+            witness_result_id = latest.get("result_id")
+        else:
+            witness_status = "PENDING"
+
+    verif_record["witness_claim_id"] = witness_claim_id or None
+    verif_record["witness_status"] = witness_status
+    verif_record["witness_verdict"] = witness_verdict
+    verif_record["witness_result_id"] = witness_result_id
 
     # Persist to verification_log.jsonl (APPEND-ONLY)
     _append_verification_record(verif_record)
@@ -612,6 +645,9 @@ def chron_record_verification(
         "observed_outcome": observed_outcome,
         "brier_score": verif_record["brier_score"],
         "verdict": verif_record["verdict"],
+        "witness_status": witness_status,
+        "witness_verdict": witness_verdict,
+        "witness_claim_id": witness_claim_id or None,
         "calibration_synced": calibration_synced,
         "calibration_error": calibration_error,
         "query_time": _now_iso(),
@@ -1515,10 +1551,14 @@ def chron_frame_witness(
         }
 
     summary_text = "; ".join(str(c.get("text", ""))[:80] for c in claims[:5])
+    import uuid
+
+    claim_id = f"frame-{uuid.uuid4().hex[:12]}"
     req = fw_request(
         claim=summary_text or "unnamed claim set",
         evidence=[json.dumps(c.get("evidence", {})) for c in claims[:20]],
         source="chron_frame_witness",
+        claim_id=claim_id,
     )
 
     try:
@@ -1534,6 +1574,7 @@ def chron_frame_witness(
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         return {
             "error": f"FRAME unreachable at {FRAME_URL}: {exc}",
+            "claim_id": claim_id,
             "request_logged": True,
             "request": req,
             "note": "witness request stays PENDING in frame_requests.jsonl",
@@ -1573,9 +1614,12 @@ def chron_frame_witness(
         evidence_quality=quality,
         contradictions=contradictions,
         confidence=confidence,
+        claim_id=claim_id,
+        rows=rows,
     )
 
     return {
+        "claim_id": claim_id,
         "witness_verdict": verdict,
         "evidence_quality": quality,
         "contradictions": contradictions,
@@ -1588,6 +1632,7 @@ def chron_frame_witness(
         ),
         "audit": {
             "request_file": "frame_requests.jsonl",
+            "result_file": "frame_results.jsonl",
             "result_id": rec.get("result_id"),
             "frame_url": f"{FRAME_URL}/frame/witness/claims",
         },
