@@ -140,6 +140,18 @@ def cmd_tools(args):
         print(f"  {t.name}: {first_line[:100]}")
 
 
+def cmd_contracts(args):
+    """Audit resolution contracts: who can decide, and when."""
+    from chron_contract_audit import audit
+
+    report = audit()
+    if "--json" in args:
+        print(json.dumps(report, indent=2, default=str))
+    else:
+        print(json.dumps(report["summary"], indent=2, default=str))
+        print("\nUse --json for one item per prediction.")
+
+
 def cmd_call(args):
     """Call a CHRON tool from the CLI.
 
@@ -196,6 +208,7 @@ def main():
         "generate": lambda: cmd_generate(rest),
         "calibration": lambda: cmd_calibration(rest),
         "tools": lambda: cmd_tools(rest),
+        "contracts": lambda: cmd_contracts(rest),
         "call": lambda: cmd_call(rest),
     }
 

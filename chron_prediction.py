@@ -169,9 +169,7 @@ def create_prediction(
         # at birth, not at read time — the birth record is the witness.
         "rationality_filter_class": list(rationality_filter_class or []),
         "rationality_filter_confidence_ceiling": (
-            rationality_filter_confidence_ceiling
-            if (rationality_filter_class)
-            else 1.0
+            rationality_filter_confidence_ceiling if (rationality_filter_class) else 1.0
         ),
         # ── Provenance (immutable) ──
         "source": source,
@@ -651,6 +649,7 @@ def _classify_error(prediction: dict) -> str:
 # from chron.chron_gut_override only). Anti-Bangang LAW 8 forbids
 # duplicate governance surfaces. Canonical spec:
 #   /root/AAA/instructions/gut-override-ledger-spec.md
+
 
 def compute_calibration() -> dict:
     """Compute calibration statistics over decided predictions.
@@ -1167,6 +1166,11 @@ def generate_from_chron_events() -> list[dict]:
                     threshold_low=sub_pred.get("threshold_low"),
                     threshold_high=sub_pred.get("threshold_high"),
                     unit=sub_pred.get("unit", ""),
+                    # Coverage window for ABSENCE claims ("zero failures for
+                    # 7 days"). Without it, verify_at alone cannot establish
+                    # that the absence held for the whole window.
+                    coverage=sub_pred.get("coverage")
+                    or sub_pred.get("coverage_window"),
                     # ── P0 provenance fields ──
                     evidence_snapshot=evidence_snapshot,
                     source_refs=source_refs,
@@ -1210,7 +1214,11 @@ def generate_from_chron_events() -> list[dict]:
         # this the forecaster's real probability is discarded before
         # confidence_proposed and the calibrator cannot discriminate.
         amp = event.get("amplitude")
-        if isinstance(amp, (int, float)) and not isinstance(amp, bool) and 0.0 <= float(amp) <= 1.0:
+        if (
+            isinstance(amp, (int, float))
+            and not isinstance(amp, bool)
+            and 0.0 <= float(amp) <= 1.0
+        ):
             proposed = float(amp)
         else:
             proposed = float(confidence_map.get(event.get("confidence", ""), 0.5))
