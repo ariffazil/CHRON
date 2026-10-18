@@ -126,4 +126,42 @@ Time is not one thing: physics gives it as a relational coordinate, thermodynami
 
 ---
 
+## 10. Sources (primary links)
+
+**Source status:** these are the primary or institutional sources used. A link means the claim matches the abstract/release; it does **not** mean this session re-ran the experiment. Literature observations are marked OBS only where the cited source reports a measurement.
+
+**Metrology**
+- BIPM, 28th CGPM resolutions adopted 15 Oct 2026 — https://www.bipm.org/en/-/cgpm-2026-resolutions-adopted
+- BIPM, CCTF President statement to CGPM 2026 (second 2030, continuous UTC 20 May 2027, lunar time) — https://www.bipm.org/documents/d/guest/statement-cctf-president-cgpm-2026
+- BIPM, FAQ: redefinition of the second — https://www.bipm.org/en/faq-redefinition-second
+- Riehle et al., roadmap towards the redefinition of the second, *Metrologia* (2024) — https://doi.org/10.1088/1681-7575/ad17d2
+- NIST, The Second: The Future — https://www.nist.gov/si-redefinition/second/second-future
+
+**Nuclear clocks**
+- Toscani De Col et al., “A thorium-229 optical nuclear clock with feedback loop,” *Nature* (7 Oct 2026) — https://doi.org/10.1038/s41586-026-11084-4
+- “A nuclear clock synchronized to ²²⁹Th,” *Nature* (7 Oct 2026) — https://doi.org/10.1038/s41586-026-11122-1
+- Ooi et al., “Frequency reproducibility of solid-state thorium-229 nuclear clocks,” *Nature* 650, 72–78 (2026) — https://doi.org/10.1038/s41586-025-09999-5
+
+**Arrow of time / quantum thermodynamics**
+- García-Pintos, Liu, Gorshkov, “Reshaping the Quantum Arrow of Time,” *Phys. Rev. X* (published 19 Feb 2026) — https://link.aps.org/doi/10.1103/l18s-9vmh
+- Moreva et al., “Time from quantum entanglement: an experimental illustration,” *Phys. Rev. A* 89, 052122 (2014) — https://doi.org/10.1103/PhysRevA.89.052122
+
+**Cosmology**
+- DESI DR2 results, March 2025 — https://www.desi.lbl.gov/2025/03/19/more-than-a-hint-of-evolving-dark-energy-new-results-and-data-from-desi/
+- DESI extended dark-energy analysis, arXiv:2503.14743 — https://arxiv.org/abs/2503.14743
+
+**Time crystals**
+- Moon et al., “Experimental observation of a time rondeau crystal,” *Nat. Phys.* 21, 1813–1819 (2025) — https://doi.org/10.1038/s41567-025-03028-y
+
+**Biology / time perception**
+- Nobel Prize in Physiology or Medicine 2017 (Hall, Rosbash, Young) — https://www.nobelprize.org/prizes/medicine/2017/summary/
+- “Midbrain Dopamine Warps Subjective Time via Threshold Setting But Not Clock Speed,” *J. Neurosci.* 46(4) (2026) — https://www.jneurosci.org/content/jneuro/46/4/e1453252025.full.pdf
+- “Dopaminergic processes predict temporal distortions in event memory,” *Nat. Commun.* (2026) — https://doi.org/10.1038/s41467-026-69950-8
+- “Neural Representation of Episodic Time,” *J. Neurosci.* 45(46) (2025) — https://www.jneurosci.org/content/45/46/e1397252025
+
+**Scripture**
+- Qur’an 103 (Al-‘Asr). Hadith on health and free time: *Ṣaḥīḥ al-Bukhārī* (kitāb al-riqāq).
+
+---
+
 *DITEMPA BUKAN DIBERI — time is the material; consequence is the product.*

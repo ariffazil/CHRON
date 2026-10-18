@@ -3,7 +3,7 @@
 Exposes CHRON's prediction, verification, calibration, episode,
 lesson, proxy-reality, and attention-debt stores as MCP tools.
 
-20 tools · 8 resources · 4 prompts · v4.1.0 (2026-10-06 — chron_frame_witness bridge lit)
+21 tools · 8 resources · 4 prompts · v4.1.0 (2026-10-06 — chron_frame_witness bridge lit)
 
 Arrow of Time lifecycle:
     Event → Prediction → Verification → Error → Lesson → Policy
@@ -131,7 +131,7 @@ mcp = FastMCP(
     version="4.1.0",
     instructions=(
         "CHRON — Temporal Consequence Tracker. v4.1.0. "
-        "20 tools across the Arrow of Time: Event → Prediction → Verification → "
+        "21 tools across the Arrow of Time: Event → Prediction → Verification → "
         "Error → Lesson. Predicts, verifies, calibrates, learns. "
         "chron_frame_witness bridges the independent FRAME witness (separation of "
         "powers: FRAME observes from outside, arifOS adjudicates). "
