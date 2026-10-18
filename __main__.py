@@ -126,12 +126,18 @@ def cmd_calibration(args):
 
 
 def cmd_tools(args):
-    from chron_mcp import list_tools
+    """List the canonical 21-tool surface served at :18102."""
+    import asyncio
+    import importlib
 
-    tools = list_tools()
+    server = importlib.import_module("chron.server")
+    tools = asyncio.run(server.mcp.list_tools())
     print(f"CHRON MCP Tools: {len(tools)}")
-    for t in tools:
-        print(f"  {t['name']}: {t['description']}")
+    for t in sorted(tools, key=lambda x: x.name):
+        first_line = (
+            (t.description or "").strip().splitlines()[0] if t.description else ""
+        )
+        print(f"  {t.name}: {first_line[:100]}")
 
 
 def cmd_call(args):
