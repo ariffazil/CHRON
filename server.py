@@ -46,6 +46,7 @@ from chron.chron_prediction import (
     compute_calibration,
     load_predictions,
     generate_from_chron_events,
+    resolved_ids,
     _canonical_verdict,
     _DECISIVE,
     VERDICT_UNVERIFIABLE,
@@ -163,9 +164,38 @@ def chron_predictions_due() -> dict:
     here represents an unpaid epistemic debt.
     """
     due = get_due()
+
+    # Unbound predictions never enter get_due() (status is UNBOUND, not ACTIVE),
+    # so without this counter they age silently forever: no verifier sees them,
+    # no debt is minted, and the arrow never closes. Expose them where agents
+    # look for temporal work, not only in the offline scanner.
+    now = datetime.now(timezone.utc)
+    resolved = resolved_ids()
+    stale_unbound = []
+    for p in load_predictions():
+        if p.get("status") != "UNBOUND" or p.get("prediction_id") in resolved:
+            continue
+        try:
+            verify_at = datetime.fromisoformat(
+                str(p.get("verify_at", "")).replace("Z", "+00:00")
+            )
+        except ValueError:
+            continue
+        if now >= verify_at:
+            stale_unbound.append(
+                {
+                    "prediction_id": p.get("prediction_id"),
+                    "claim": (p.get("claim") or "")[:160],
+                    "verify_at": p.get("verify_at"),
+                    "source_id": p.get("source_id"),
+                }
+            )
+
     return {
         "due": due,
         "count": len(due),
+        "stale_unbound": stale_unbound,
+        "stale_unbound_count": len(stale_unbound),
         "query_time": _now_iso(),
         "next_verify_at": _next_verify_at(),
     }

@@ -140,7 +140,11 @@ def chron_store_stats() -> dict:
     preds = load_predictions()
     lessons = load_lessons()
 
-    active = [p for p in preds if p.get("status") == "ACTIVE"]
+    # Resolved (CORRECT/INCORRECT/CLOSED-UNTESTABLE) predictions must not
+    # count as "active" even though their immutable birth records still say
+    # status: ACTIVE. get_active() already joins the verification ledger and
+    # excludes resolved arrows; the raw status filter here over-counted.
+    active = get_active()
     verif_log = get_verified(limit=10000)
     verified = [v for v in verif_log if _canonical_verdict(v) in _DECISIVE]
     due = get_due()

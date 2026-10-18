@@ -23,8 +23,12 @@ from __future__ import annotations
 import json
 import pathlib
 import subprocess
+import sys
 import urllib.request
 from datetime import datetime, timezone, timedelta
+
+sys.path.insert(0, "/root")
+from chron.chron_prediction import resolved_ids  # noqa: E402
 
 PREDICTIONS = pathlib.Path("/root/chron/data/predictions.jsonl")
 OIL_SNAPSHOT = "http://127.0.0.1:3457/api/snapshot"
@@ -51,9 +55,14 @@ def probe_systemd_venv(claim: str):
     if "/opt/arifos/venv" not in claim:
         return None
     out = subprocess.run(
-        ["bash", "-lc",
-         "grep -rl '/opt/arifos/venv' /etc/systemd/system/*.service 2>/dev/null | wc -l"],
-        capture_output=True, text=True, timeout=60,
+        [
+            "bash",
+            "-lc",
+            "grep -rl '/opt/arifos/venv' /etc/systemd/system/*.service 2>/dev/null | wc -l",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     count = int((out.stdout or "0").strip() or 0)
     observed = f"{count} live unit file(s) still reference /opt/arifos/venv"
@@ -77,7 +86,11 @@ def probe_brent_band(claim: str):
         return "AWAITING_EVIDENCE", "oil lane returned no price"
     observed = f"XBRENT={price} at {snap.get('observed_at')}"
     # A reading today is a leading indicator, NOT a verdict on a later window.
-    state = "FALSIFIER_ALREADY_SATISFIED" if not (low <= float(price) <= high) else "SIGNAL_PRESENT"
+    state = (
+        "FALSIFIER_ALREADY_SATISFIED"
+        if not (low <= float(price) <= high)
+        else "SIGNAL_PRESENT"
+    )
     return state, observed
 
 
@@ -111,42 +124,85 @@ def probe_tree777_crontab(claim: str):
     for path in ("/etc/cron.d", "/etc/crontab"):
         out = subprocess.run(
             ["bash", "-lc", f"grep -rni 'tree777' {path} 2>/dev/null || true"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         text = (out.stdout or "").strip()
         if text:
             hits.append(path)
     root_cron = subprocess.run(
         ["bash", "-lc", "crontab -l 2>/dev/null | grep -i tree777 || true"],
-        capture_output=True, text=True, timeout=15,
+        capture_output=True,
+        text=True,
+        timeout=15,
     )
     if (root_cron.stdout or "").strip():
         hits.append("root-crontab")
     observed = (
-        f"tree777 matches in: {', '.join(hits)}" if hits else "tree777 absent from crontab surfaces"
+        f"tree777 matches in: {', '.join(hits)}"
+        if hits
+        else "tree777 absent from crontab surfaces"
     )
     # Claim asserts ABSENCE. Falsifier: a match appears.
     state = "FALSIFIER_ALREADY_SATISFIED" if hits else "SIGNAL_PRESENT"
     return state, observed
 
 
-PROBES = (probe_systemd_venv, probe_brent_band, probe_weekly_packet, probe_tree777_crontab)
+PROBES = (
+    probe_systemd_venv,
+    probe_brent_band,
+    probe_weekly_packet,
+    probe_tree777_crontab,
+)
 
 
 def main() -> int:
     now = datetime.now(timezone.utc)
-    rows = [json.loads(line) for line in PREDICTIONS.read_text().splitlines() if line.strip()]
+    rows = [
+        json.loads(line)
+        for line in PREDICTIONS.read_text().splitlines()
+        if line.strip()
+    ]
+
+    # A prediction whose ledger already carries a decisive or CLOSED-UNTESTABLE
+    # verdict is not "unscored" — the old scan ignored the ledger and reported
+    # every past-date row as DUE (60 on 2026-10-19, while the verifier saw 0).
+    # Terminal birth statuses likewise never re-enter the queue.
+    resolved = resolved_ids()
+    terminal_statuses = {
+        "CORRECT",
+        "INCORRECT",
+        "FALSIFIED",
+        "RESOLVED",
+        "SCORED",
+        "VERIFIED",
+        "VOIDED_SECTION_12",
+        "SUPERSEDED",
+    }
 
     buckets: dict[str, list] = {}
     for row in rows:
         due = _parse(row.get("verify_at"))
         status = (row.get("status") or "").upper()
-        if status in ("CORRECT", "FALSIFIED", "RESOLVED", "SCORED"):
+        pid = row.get("prediction_id")
+        if pid in resolved or status in terminal_statuses:
             continue
         if due is None:
             continue
         if due <= now:
-            buckets.setdefault("DUE", []).append((row, "verify_at reached"))
+            if status == "UNBOUND":
+                # Unbound predictions deliberately do not consume the normal
+                # verifier's attention, but past verify_at they are zombies:
+                # never bound, never scored, never closed. Name them.
+                buckets.setdefault("UNBOUND_OVERDUE", []).append(
+                    (
+                        row,
+                        "verify_at reached with no probe binding; needs bind or close",
+                    )
+                )
+            else:
+                buckets.setdefault("DUE", []).append((row, "verify_at reached"))
             continue
 
         state, observed = "AWAITING_EVIDENCE", "no probe registered for this source"
@@ -156,7 +212,10 @@ def main() -> int:
                 state, observed = result
                 break
         if state == "AWAITING_EVIDENCE" and (row.get("audience") or "") == "arif":
-            state, observed = "HUMAN_WITNESS_REQUIRED", "audience=arif; no machine probe"
+            state, observed = (
+                "HUMAN_WITNESS_REQUIRED",
+                "audience=arif; no machine probe",
+            )
         buckets.setdefault(state, []).append((row, observed))
 
     n = sum(len(v) for v in buckets.values())
@@ -168,6 +227,7 @@ def main() -> int:
     for state in (
         "FALSIFIER_ALREADY_SATISFIED",
         "DUE",
+        "UNBOUND_OVERDUE",
         "SIGNAL_PRESENT",
         "HUMAN_WITNESS_REQUIRED",
         "AWAITING_EVIDENCE",
@@ -188,10 +248,14 @@ def main() -> int:
         "awaiting_machine_probe": awaiting,
         "human_witness_required": human,
         "share_unprobed": (awaiting / n) if n else None,
-        "note": "AWAITING_EVIDENCE = no registered machine probe AND not audience=arif. HUMAN_WITNESS_REQUIRED = audience=arif with no machine probe. Some calendar claims (budget day, BNM) stay human. EARLY_FALSIFIER_SATISFIED != FALSIFIED.",
+        "note": "AWAITING_EVIDENCE = no registered machine probe AND not audience=arif. HUMAN_WITNESS_REQUIRED = audience=arif with no machine probe. DUE is ledger-aware: rows with a decisive or CLOSED-UNTESTABLE verdict, and terminal birth statuses, are excluded. UNBOUND_OVERDUE = past verify_at but never probe-bound; it is invisible to get_due() by design and must be bound or closed. EARLY_FALSIFIER_SATISFIED != FALSIFIED.",
         "buckets": {
             k: [
-                {"prediction_id": r.get("prediction_id"), "claim": (r.get("claim") or "")[:120], "observed": o}
+                {
+                    "prediction_id": r.get("prediction_id"),
+                    "claim": (r.get("claim") or "")[:120],
+                    "observed": o,
+                }
                 for r, o in items
             ]
             for k, items in buckets.items()

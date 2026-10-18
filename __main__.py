@@ -135,13 +135,39 @@ def cmd_tools(args):
 
 
 def cmd_call(args):
-    from chron_mcp import call_tool
+    """Call a CHRON tool from the CLI.
 
+    Resolution order:
+      1. `chron.server` — the same 21-tool surface the MCP process serves at
+         :18102. This is the canonical path; the old `chron_mcp` module only
+         exposed 7 read tools and silently reported the other 14 as unknown.
+      2. `chron_mcp.call_tool` — legacy fallback for names the server does not
+         expose (kept so old scripts do not break).
+
+    Usage: python3 -m chron call <tool_name> [kwargs_json]
+    """
     if not args:
         print("Usage: python3 -m chron call <tool_name> [kwargs_json]")
         return
     tool_name = args[0]
     kwargs = json.loads(args[1]) if len(args) > 1 else {}
+
+    # Names that existed only on the legacy surface.
+    legacy_aliases = {
+        "chron_calibration": "chron_calibration_state",
+    }
+    resolved = legacy_aliases.get(tool_name, tool_name)
+
+    import importlib
+
+    server = importlib.import_module("chron.server")
+    fn = getattr(server, resolved, None)
+    if callable(fn) and resolved.startswith("chron_"):
+        print(json.dumps(fn(**kwargs), indent=2, default=str))
+        return
+
+    from chron_mcp import call_tool
+
     result = call_tool(tool_name, **kwargs)
     print(json.dumps(result, indent=2, default=str))
 
