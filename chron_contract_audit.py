@@ -232,6 +232,9 @@ def audit() -> dict:
         (r.get("resolution") or {}).get("completeness", "ABSENT") for r in ver_rows
     )
     witness_status = Counter(r.get("witness_status", "ABSENT") for r in ver_rows)
+    verification_times = Counter(
+        (r.get("resolution") or {}).get("time_status", "ABSENT") for r in ver_rows
+    )
 
     summary = {
         "total": len(items),
@@ -248,6 +251,7 @@ def audit() -> dict:
         "verification_rows": len(ver_rows),
         "verification_provenance": dict(verification_provenance),
         "witness_status": dict(witness_status),
+        "verification_times": dict(verification_times),
     }
     report = {"summary": summary, "items": items}
     OUT.parent.mkdir(parents=True, exist_ok=True)

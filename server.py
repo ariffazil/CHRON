@@ -563,6 +563,10 @@ def chron_record_verification(
         resolver_id: who/what applied the criterion
         resolver_relation: independent | same_agent | human_witness | machine_probe
 
+    Resolution completeness requires criterion, evidence_ref, outcome_time,
+    observation_time, entailment, and resolver_id. Missing either time marks
+    the record `time_status=COLLAPSED` and does not claim COMPLETE.
+
     Returns:
         Verification record with Brier score, verdict, and verification_id.
         If the prediction has already been verified, returns ALREADY_VERIFIED.
@@ -634,13 +638,29 @@ def chron_record_verification(
         "resolver_id": resolver_id,
         "resolver_relation": resolver_relation,
     }
-    required = ("criterion", "evidence_ref", "entailment", "resolver_id")
+    required = (
+        "criterion",
+        "evidence_ref",
+        "outcome_time",
+        "observation_time",
+        "entailment",
+        "resolver_id",
+    )
+    resolution["time_status"] = (
+        "FULL" if outcome_time and observation_time else "COLLAPSED"
+    )
     resolution["completeness"] = (
         "COMPLETE"
         if all(str(resolution.get(k, "")).strip() for k in required)
         else "PARTIAL"
     )
     verif_record["resolution"] = resolution
+
+    time_warning = None
+    if resolution["time_status"] == "COLLAPSED":
+        time_warning = (
+            "event/observation time missing; record time may be mistaken for event time"
+        )
 
     # Persist to verification_log.jsonl (APPEND-ONLY)
     _append_verification_record(verif_record)
@@ -688,6 +708,7 @@ def chron_record_verification(
         "witness_verdict": witness_verdict,
         "witness_claim_id": witness_claim_id or None,
         "resolution": resolution,
+        "time_warning": time_warning,
         "calibration_synced": calibration_synced,
         "calibration_error": calibration_error,
         "query_time": _now_iso(),

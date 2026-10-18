@@ -148,6 +148,8 @@ VOID ──retraction──► re-opens the arrow
 `get_due = {get_active | now ≥ verify_at}`.
 This is a directed acyclic resolution graph, not a boolean. `VERIFIED_CORRECT` and `UNVERIFIABLE` are different terminal classes; a VOID does not resolve.
 
+**Four times on one verification record:** `outcome_time` = event time; `observation_time` = when evidence became available; `created_at`/`verified_at` = record and decision time. A decisive verification with either time missing is marked `resolution.time_status=COLLAPSED` and `completeness=PARTIAL`; the record may not silently equate record time with event time. `authority_time` is not in CHRON — it belongs to the arifOS judge/ACT receipt.
+
 ### 4.5 Attention debt as an aging backlog
 
 ```
