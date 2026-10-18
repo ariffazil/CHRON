@@ -40,6 +40,8 @@ THRESHOLD_RE = re.compile(
     r"(>=|<=|>|<|≥|≤|\babove\b|\bbelow\b|\bat least\b|\bat most\b|\bbetween\b)", re.I
 )
 EVENT_RE = re.compile(r"^(event\s*:|.*\bwill (occur|happen|be)\b)", re.I)
+GENERIC_SUCCESS_RE = re.compile(r"^Event '.*' occurs by ", re.I)
+GENERIC_FAILURE_RE = re.compile(r"^Event '.*' does not occur by ", re.I)
 
 
 def _s(r: dict) -> str:
@@ -66,6 +68,17 @@ def _claim_type(claim: str) -> str:
     if EVENT_RE.search(claim):
         return "EVENT"
     return "OTHER"
+
+
+def _generic_contract(success: str, failure: str) -> bool:
+    """True for the fallback 'Event ... occurs by DATE' rule.
+
+    These are generated when an event has no predictions[] array. The specific
+    evidence path may exist in the event note, but it is NOT encoded in the
+    prediction birth record, so the decision is not reproducible from the
+    record alone.
+    """
+    return bool(GENERIC_SUCCESS_RE.match(success) and GENERIC_FAILURE_RE.match(failure))
 
 
 def classify(r: dict) -> dict:
@@ -131,6 +144,23 @@ def classify(r: dict) -> dict:
             "verify_at": deadline,
         }
 
+    if _generic_contract(success, failure):
+        resolver = "MACHINE" if probe else ("HUMAN" if audience == "arif" else "NONE")
+        return {
+            "prediction_id": r.get("prediction_id"),
+            "claim": claim,
+            "contract_status": "GENERIC_CONTRACT",
+            "resolver": resolver,
+            "claim_type": claim_type,
+            "missing": ["specific_evidence_criterion"],
+            "decision_time": "AT_EVENT_EVIDENCE_OR_NOTE",
+            "decision_rule": "generic event-occurrence rule; the specific evidence path is not encoded in the birth record — decision depends on the event note and is not reproducible from the prediction alone",
+            "provenance": _provenance(r),
+            "coverage_required": claim_type == "ABSENCE",
+            "coverage_specified": _coverage(r),
+            "verify_at": deadline,
+        }
+
     if probe:
         resolver = "MACHINE"
         decision_time = "AT_PROBE_RESULT"
@@ -190,6 +220,9 @@ def audit() -> dict:
         "by_resolver": dict(Counter(i["resolver"] for i in items)),
         "by_claim_type": dict(Counter(i["claim_type"] for i in items)),
         "with_provenance": sum(1 for i in items if i["provenance"]),
+        "generic_contracts": sum(
+            1 for i in items if i["contract_status"] == "GENERIC_CONTRACT"
+        ),
         "coverage_required": sum(1 for i in items if i["coverage_required"]),
         "coverage_specified": sum(1 for i in items if i["coverage_specified"]),
         "decision_time": dict(Counter(i["decision_time"] for i in items)),
