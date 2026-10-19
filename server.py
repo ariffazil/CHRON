@@ -1453,6 +1453,7 @@ def chron_create_event(
     event_id: str,
     title: str,
     target_date: str,
+    occurred_at: str = "",
     kind: str = "OBSERVATION",
     audience: str = "both",
     source: str = "agent",
@@ -1475,6 +1476,9 @@ def chron_create_event(
         event_id: Unique kebab-case ID (e.g. 'my-004-inflation-oct')
         title: Human-readable event description
         target_date: ISO date YYYY-MM-DD
+        occurred_at: ISO-8601 timestamp when the event actually happened.
+            Required for the freshness axis: past-only events stay silent once
+            their age exceeds the freshness window. Omit for future events.
         kind: FISCAL, MARKET_EVENT, REGULATORY_WINDOW, PERSONAL_SAFE, MACRO_INDICATOR, MONETARY_POLICY, OBSERVATION
         audience: 'arif', 'syed', or 'both'
         source: Where this comes from (URL, institution, agent)
@@ -1522,6 +1526,15 @@ def chron_create_event(
             "query_time": _now_iso(),
         }
 
+    if occurred_at:
+        try:
+            datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+        except ValueError:
+            return {
+                "error": "occurred_at must be ISO-8601 (e.g. 2026-10-18T22:00:00+08:00)",
+                "query_time": _now_iso(),
+            }
+
     try:
         freshness_window_hours = int(freshness_window_hours)
         max_delivery_delay_hours = int(max_delivery_delay_hours)
@@ -1552,6 +1565,8 @@ def chron_create_event(
         "detection_cadence": detection_cadence,
         "max_delivery_delay_hours": max_delivery_delay_hours,
     }
+    if occurred_at:
+        new_event["occurred_at"] = occurred_at
 
     # Amplitude is optional and validated at the boundary: an out-of-range or
     # non-numeric value is a caller bug, and silently clamping it would forge a
