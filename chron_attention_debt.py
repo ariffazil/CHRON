@@ -559,13 +559,38 @@ def _compute_growth_rate(current_ad: float) -> Optional[float]:
 
 
 def get_attention_debt() -> dict:
-    """Full Attention Debt report for MCP surface."""
+    """Full Attention Debt report for MCP surface.
+
+    The persisted ledger is append-only snapshot history: the same debt_id can
+    appear OPEN, RESOLVED, and OPEN again. `total_ad`/`item_count` are the LIVE
+    recomputation; `ledger` exposes the historical rows separately so a reader
+    cannot mistake 66 historical OPEN rows for 66 current debts.
+    """
     items = collect_current_debt()
     result = compute_attention_debt(items)
 
     # Record snapshot for trend tracking
     _snapshot_ad(result["total_ad"], result["item_count"])
 
+    ledger = _load_all_debt()
+    latest: dict[str, dict] = {}
+    for item in ledger:
+        latest[item.get("debt_id")] = item
+    latest_status: dict[str, int] = {}
+    for item in latest.values():
+        status = item.get("status", "UNKNOWN")
+        latest_status[status] = latest_status.get(status, 0) + 1
+    result["ledger"] = {
+        "rows": len(ledger),
+        "unique_ids": len(latest),
+        "historical_open_rows": sum(1 for i in ledger if i.get("status") == "OPEN"),
+        "latest_status": latest_status,
+        "current_open": result["item_count"],
+        "note": (
+            "historical_open_rows is append-only history; latest_status is the "
+            "latest row per debt_id; current_open is the live recomputation."
+        ),
+    }
     return result
 
 
