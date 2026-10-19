@@ -3,7 +3,7 @@
 Exposes CHRON's prediction, verification, calibration, episode,
 lesson, proxy-reality, and attention-debt stores as MCP tools.
 
-21 tools · 8 resources · 4 prompts · v4.1.0 (2026-10-06 — chron_frame_witness bridge lit)
+22 tools · 8 resources · 4 prompts · v4.2.0 (2026-10-06 — chron_frame_witness bridge lit)
 
 Arrow of Time lifecycle:
     Event → Prediction → Verification → Error → Lesson → Policy
@@ -129,10 +129,10 @@ class EventKind(str, Enum):
 
 mcp = FastMCP(
     "CHRON",
-    version="4.1.0",
+    version="4.2.0",
     instructions=(
-        "CHRON — Temporal Consequence Tracker. v4.1.0. "
-        "21 tools across the Arrow of Time: Event → Prediction → Verification → "
+        "CHRON — Temporal Consequence Tracker. v4.2.0. "
+        "22 tools across the Arrow of Time: Event → Prediction → Verification → "
         "Error → Lesson. Predicts, verifies, calibrates, learns. "
         "chron_frame_witness bridges the independent FRAME witness (separation of "
         "powers: FRAME observes from outside, arifOS adjudicates). "
@@ -1096,6 +1096,128 @@ def chron_attention_debt() -> dict:
 
 
 @mcp.tool()
+def chron_timing_audit(audience: str = "all") -> dict:
+    """Audit event timing against the freshness contract.
+
+    Flags:
+      - STALE events past freshness_window_hours (delivery would be history)
+      - DUE_TODAY/FRESH events whose declared detection_cadence is coarser
+        than daily/event-driven
+      - RESOLVED events that no longer need polling
+
+    This is a read-only timing audit, not a scheduler. Use the warning to
+    fix the cron cadence or to close the event.
+    """
+    if not CHRON_EVENTS_STORE.exists():
+        return {
+            "error": f"{CHRON_EVENTS_STORE} not found",
+            "counts": {},
+            "events": [],
+            "query_time": _now_iso(),
+        }
+
+    data = json.loads(CHRON_EVENTS_STORE.read_text())
+    now = datetime.now(timezone.utc)
+    today = datetime.now(MYT).date()
+    rows = []
+
+    for e in data.get("events", []):
+        if audience != "all" and e.get("audience") not in (audience, "both"):
+            continue
+
+        target = e.get("target_date")
+        days_until = None
+        age_hours = None
+        timing_status = "NO_DATE"
+
+        if target:
+            try:
+                d = datetime.strptime(target, "%Y-%m-%d").date()
+            except ValueError:
+                timing_status = "INVALID_DATE"
+            else:
+                days_until = (d - today).days
+                end = datetime(d.year, d.month, d.day, tzinfo=MYT) + timedelta(days=1)
+                age_hours = max(0.0, (now - end).total_seconds() / 3600.0)
+                if e.get("resolution"):
+                    timing_status = "RESOLVED"
+                elif days_until > 1:
+                    timing_status = "UPCOMING"
+                elif days_until >= 0:
+                    timing_status = "DUE_TODAY"
+                else:
+                    try:
+                        fw = int(e.get("freshness_window_hours", 24) or 24)
+                    except (TypeError, ValueError):
+                        fw = 24
+                    timing_status = "FRESH" if age_hours <= fw else "STALE"
+
+        try:
+            freshness = int(e.get("freshness_window_hours", 24) or 24)
+        except (TypeError, ValueError):
+            freshness = 24
+        try:
+            max_delay = int(e.get("max_delivery_delay_hours", 24) or 24)
+        except (TypeError, ValueError):
+            max_delay = 24
+        cadence = str(e.get("detection_cadence") or "unspecified").strip().lower()
+
+        warning = None
+        recommended = None
+        if timing_status == "STALE":
+            warning = "event is past its freshness window; delivery would be history"
+            recommended = "stop polling; resolve or close the event"
+        elif timing_status in ("DUE_TODAY", "FRESH") and cadence not in (
+            "hourly",
+            "daily",
+            "event_driven",
+            "event-driven",
+        ):
+            warning = (
+                f"event window is active but detection cadence is {cadence!r}, "
+                "coarser than daily/event-driven"
+            )
+            recommended = "daily during the event window; event-driven on result day"
+
+        rows.append(
+            {
+                "event_id": e.get("id"),
+                "title": e.get("title"),
+                "target_date": target,
+                "audience": e.get("audience"),
+                "days_until": days_until,
+                "age_hours": round(age_hours, 2) if age_hours is not None else None,
+                "freshness_window_hours": freshness,
+                "max_delivery_delay_hours": max_delay,
+                "detection_cadence": cadence,
+                "timing_status": timing_status,
+                "resolution": bool(e.get("resolution")),
+                "warning": warning,
+                "recommended_cadence": recommended,
+            }
+        )
+
+    rows.sort(
+        key=lambda r: (
+            r["days_until"] is None,
+            r["days_until"] if r["days_until"] is not None else 99999,
+        )
+    )
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r["timing_status"]] = counts.get(r["timing_status"], 0) + 1
+
+    return {
+        "generated_at": _now_iso(),
+        "counts": counts,
+        "events": rows,
+        "stale_events": [r for r in rows if r["timing_status"] == "STALE"],
+        "warnings": [r for r in rows if r.get("warning")],
+        "query_time": _now_iso(),
+    }
+
+
+@mcp.tool()
 def chron_lessons(limit: int = 20, status: str = "all") -> dict:
     """Get extracted lessons — what the institution has learned from verified outcomes.
 
@@ -1339,6 +1461,9 @@ def chron_create_event(
     consequence: str = "MEDIUM",
     actionability: str = "WATCH",
     amplitude: float | None = None,
+    freshness_window_hours: int = 24,
+    detection_cadence: str = "",
+    max_delivery_delay_hours: int = 24,
 ) -> dict:
     """Create a new event in chron_events.json — plant a temporal stake.
 
@@ -1365,6 +1490,13 @@ def chron_create_event(
             it every forecast collapses onto the enum default and the calibrator
             cannot tell a 0.25 claim from a 0.55 claim. Omit for non-forecast
             events (birthdays, deadlines, fiscal windows).
+        freshness_window_hours: How long after target_date the result is still
+            "news" (default 24). Past this, delivery is history.
+        detection_cadence: Declared polling cadence — hourly, daily,
+            weekly, event_driven. Used by chron_timing_audit to flag a cadence
+            coarser than the freshness window.
+        max_delivery_delay_hours: Maximum allowed delay between event and
+            delivery (default 24). A job whose cadence exceeds this is flagged.
     """
     chron_events_path = Path("/root/chron/chron_events.json")
     if not chron_events_path.exists():
@@ -1390,6 +1522,20 @@ def chron_create_event(
             "query_time": _now_iso(),
         }
 
+    try:
+        freshness_window_hours = int(freshness_window_hours)
+        max_delivery_delay_hours = int(max_delivery_delay_hours)
+    except (TypeError, ValueError):
+        return {
+            "error": "freshness_window_hours and max_delivery_delay_hours must be integers",
+            "query_time": _now_iso(),
+        }
+    if freshness_window_hours < 0 or max_delivery_delay_hours < 0:
+        return {
+            "error": "freshness_window_hours and max_delivery_delay_hours must be >= 0",
+            "query_time": _now_iso(),
+        }
+
     new_event = {
         "id": event_id,
         "title": title,
@@ -1402,6 +1548,9 @@ def chron_create_event(
         "consequence": consequence,
         "actionability": actionability,
         "note": note,
+        "freshness_window_hours": freshness_window_hours,
+        "detection_cadence": detection_cadence,
+        "max_delivery_delay_hours": max_delivery_delay_hours,
     }
 
     # Amplitude is optional and validated at the boundary: an out-of-range or

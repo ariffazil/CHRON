@@ -126,7 +126,7 @@ def cmd_calibration(args):
 
 
 def cmd_tools(args):
-    """List the canonical 21-tool surface served at :18102."""
+    """List the canonical 22-tool surface served at :18102."""
     import asyncio
     import importlib
 
@@ -152,11 +152,25 @@ def cmd_contracts(args):
         print("\nUse --json for one item per prediction.")
 
 
+def cmd_timing(args):
+    """Audit event timing: fresh, due, stale, resolved."""
+    import importlib
+
+    server = importlib.import_module("chron.server")
+    result = server.chron_timing_audit()
+    if "--json" in args:
+        print(json.dumps(result, indent=2, default=str))
+        return
+    print(json.dumps(result["counts"], indent=2))
+    for w in result.get("warnings", [])[:10]:
+        print(f"  {w['event_id']} | {w['timing_status']} | {w.get('warning')}")
+
+
 def cmd_call(args):
     """Call a CHRON tool from the CLI.
 
     Resolution order:
-      1. `chron.server` — the same 21-tool surface the MCP process serves at
+      1. `chron.server` — the same 22-tool surface the MCP process serves at
          :18102. This is the canonical path; the old `chron_mcp` module only
          exposed 7 read tools and silently reported the other 14 as unknown.
       2. `chron_mcp.call_tool` — legacy fallback for names the server does not
@@ -209,6 +223,7 @@ def main():
         "calibration": lambda: cmd_calibration(rest),
         "tools": lambda: cmd_tools(rest),
         "contracts": lambda: cmd_contracts(rest),
+        "timing": lambda: cmd_timing(rest),
         "call": lambda: cmd_call(rest),
     }
 

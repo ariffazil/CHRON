@@ -39,7 +39,7 @@ CHRON is the temporal consequence tracker of the arifOS federation: it records f
 
 - **Prediction ledger** — 128 predictions recorded (49 active, 38 verified, 4 unverifiable/closed) per live `/health`.
 - **Calibration scoring** — empirical Brier score + Wilson CI over verified predictions; quality flag `SUFFICIENT` (self-measured — see gap below).
-- **MCP surface live** at `:18102` — `tools/list` returned **21 tool names** at 2026-10-16T08:50Z (server banner itself claims "20 tools"; the discrepancy is the server's, not the README's).
+- **MCP surface live** at `:18102` — `tools/list` returned **22 tool names** at 2026-10-19T03:00Z (includes chron_timing_audit; banner now says 22).
 - **Verification sweeps run** — 5 systemd timers active (`chron-task0-reconciliation`, `chron-prediction-verifier`, `chron-loop-closer`, `chron-reality-impact-attestor`, `chron-edge-midday`), last fired 2026-10-16.
 - **Attention debt accounting** — open loops tracked with growth rate (72.2 across 10 items, +1.34/day).
 
