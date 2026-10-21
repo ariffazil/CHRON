@@ -508,8 +508,45 @@ def chron_generate_predictions() -> dict:
     """Generate predictions from chron_events.json.
 
     Creates prediction objects for events that don't have one yet.
+
+    [F13 2026-10-21 — ruling sovereign] Penjanaan prediksi ialah kerja
+    Execute ("kira penjanaan prediksi chron sebagai Execute, sebab itu
+    memang kerja dia yang hasilkan output sebenar" — bukan exemption, bukan
+    biar). Resit hanya bila prediksi BENAR-BENAR dijana — run kosong tidak
+    dikira (jangan kembangkan kaunter tanpa output).
     """
     new_preds = generate_from_chron_events()
+    n = len(new_preds)
+    if n > 0:
+        try:
+            receipt = {
+                "receipt_id": str(uuid.uuid4()),
+                "created_at": _now_iso(),
+                "actor_id": "chron",
+                "session_id": f"chron-generate-{n}",
+                "step_type": "Execute",
+                "step_number": 0,
+                "cost_ns": 0,
+                "epistemic_label": "Observation",
+                "floor_verdict": "Pass",
+                "cooling_decision": "None",
+                "summary": (
+                    f"CHRON generate: {n} prediction(s) from chron_events — "
+                    "Execute per F13 ruling 2026-10-21"
+                ),
+                "routed_organ": "chron",
+                "payload": {"generated": n},
+            }
+            req = urllib.request.Request(
+                "http://127.0.0.1:7073/ingest",
+                data=json.dumps(receipt).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                pass
+        except Exception:
+            pass  # metabolism down must not kill generation
     return {
         "generated": len(new_preds),
         "predictions": new_preds,
