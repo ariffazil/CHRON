@@ -113,3 +113,14 @@ AGPL-3.0 — arifOS Federation. **DITEMPA BUKAN DIBERI.**
 | Rollback | — |
 | Flow graph | `/root/FEDERATION-FLOW-GRAPH.md` (on-box federation map — outside this repo; relative link removed 2026-10-16) |
 <!-- FEDERATION-STANDARD v2026-10-15 END -->
+
+## External Footprint & Discovery
+
+HERMES is the Tier-3 federation interface and human reality bridge of the arifOS federation.
+
+- **Discoverable:** YES (GitHub repository)
+- **Authority Ceiling:** OBSERVE_ONLY (normalizes, classifies, routes, receipts — never judges, executes, or seals)
+- **Inspectable & Forkable:** YES
+- **Independent Validation:** NOT YET ESTABLISHED
+
+Canonical Witness Ledger: [EXTERNAL_WITNESS_LEDGER.md](https://github.com/ariffazil/arifOS/blob/main/docs/EXTERNAL_WITNESS_LEDGER.md)
