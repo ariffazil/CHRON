@@ -37,7 +37,7 @@ CHRON is the temporal consequence tracker of the arifOS federation: it records f
 ## What works today
 *(all claims measured 2026-10-16 unless dated otherwise)*
 
-- **Prediction ledger** — 128 predictions recorded (49 active, 38 verified, 4 unverifiable/closed) per live `/health`.
+- **Prediction ledger** — 155 predictions recorded (51 active, 54 verified, 2 awaiting-evidence, 13 closed/unverifiable) per live `/health` (OBS 2026-10-30).
 - **Calibration scoring** — empirical Brier score + Wilson CI over verified predictions; quality flag `SUFFICIENT` (self-measured — see gap below).
 - **MCP surface live** at `:18102` — `tools/list` returned **21 tool names** at 2026-10-16T08:50Z (server banner itself claims "20 tools"; the discrepancy is the server's, not the README's).
 - **Verification sweeps run** — 5 systemd timers active (`chron-task0-reconciliation`, `chron-prediction-verifier`, `chron-loop-closer`, `chron-reality-impact-attestor`, `chron-edge-midday`), last fired 2026-10-16.
@@ -48,7 +48,7 @@ CHRON is the temporal consequence tracker of the arifOS federation: it records f
 - **Calibration numbers are runtime self-report.** No independent audit of the scoring pipeline is on record. (Self-measurement ≠ independent audit.)
 - **Learning-loop efficacy** — that lessons improve future predictions has no causal measurement.
 - **`chron_frame_witness` bridge** (independent FRAME witness path) has no end-to-end evidence in this repo.
-- **Unverifiable closure policy** — 2 predictions awaiting evidence, 2 closed untestable; the closure criteria have not been independently reviewed.
+- **Unverifiable closure policy** — 2 predictions awaiting evidence, 11 closed untestable (OBS 2026-10-30); the closure criteria have not been independently reviewed.
 
 ## 30-second proof
 
@@ -56,11 +56,12 @@ CHRON is the temporal consequence tracker of the arifOS federation: it records f
 curl -s http://127.0.0.1:18102/health
 ```
 
-Returns one JSON object — store counts, prediction accounting, calibration, attention debt — with `query_time` and cache age. Observed output (abridged, 2026-10-16T08:49:25Z):
+Returns one JSON object — store counts, prediction accounting, calibration, attention debt — with `query_time` and cache age. Observed output (abridged, 2026-10-30T17:30Z):
 
 ```json
-{"status":"ok","organ":"CHRON","port":18102,"episodes":199449,
- "predictions":{"total":128,"active":49,"verified":38},
+{"status":"ok","organ":"CHRON","port":18102,"episodes":199571,
+ "predictions":{"total":155,"active":51,"verified":54,
+  "unverifiable_awaiting_evidence":2,"closed_untestable":11,"orphan_verification_records":0},
  "calibration":{"total_verified":32,"mean_brier":0.1636,"quality":"SUFFICIENT"}}
 ```
 
@@ -76,7 +77,7 @@ Read-only. Full transcript discipline and the wider doctrine: [`docs/archive/REA
 
 ## Current verified state
 
-**Observed at 2026-10-16T08:49:25Z** — method: `curl -s http://127.0.0.1:18102/health` (runtime self-report; not an independent audit).
+**Observed at 2026-10-30T17:30Z** — method: `curl -s http://127.0.0.1:18102/health` (runtime self-report; not an independent audit).
 
 | Fact | Value |
 |---|---|
