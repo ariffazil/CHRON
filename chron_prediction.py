@@ -19,6 +19,18 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
+# 2026-10-31: the attribution vocabulary lives in chron_attribution (single owner).
+# Imported defensively so a partial install degrades to "no actor resolvable"
+# rather than failing prediction generation outright.
+try:
+    from chron_attribution import AUDIENCE_TOKENS, KNOWN_AGENTS
+except ImportError:  # pragma: no cover
+    try:
+        from .chron_attribution import AUDIENCE_TOKENS, KNOWN_AGENTS  # type: ignore
+    except ImportError:
+        AUDIENCE_TOKENS = {"", "all", "arif", "both", "federation", "none", "null", "shared", "syed", "unknown"}
+        KNOWN_AGENTS: dict[str, str] = {}
+
 PREDICTIONS_FILE = Path("/root/chron/data/predictions.jsonl")
 CALIBRATION_FILE = Path("/root/chron/data/calibration.json")
 
@@ -1055,7 +1067,39 @@ def snapshot_digest(snapshot: Optional[dict]) -> dict:
 # ───────────────────────── GENERATE FROM EVENTS ─────────────────────────
 
 
-def generate_from_chron_events() -> list[dict]:
+def resolve_caller_actor(actor: Optional[str]) -> Optional[str]:
+    """Resolve a caller-supplied actor to a registered lane root, or None.
+
+    WHY THIS EXISTS (2026-10-31, root cause of dormant BL12 calibration)
+    -------------------------------------------------------------------
+    Both emission sites below stamped `created_by` with the MODULE path
+    "chron_prediction.generate_from_chron_events". chron_attribution.observer_of()
+    reads created_by as an authorship field, and a module path is never in
+    KNOWN_AGENTS — so every generated prediction resolved to UNATTRIBUTED and
+    per-actor calibration could never accumulate a routable actor. Measured
+    2026-10-31: per_actor held exactly one key, UNATTRIBUTED, routable=false,
+    quality=INSUFFICIENT_ATTRIBUTION, while the resolver knew 13 agents.
+
+    The field could not carry an actor at all. That is the defect this closes.
+
+    FAIL CLOSED: an unrecognised actor is NOT invented into the record. It is
+    dropped, the module path remains as created_by, and the raw request is kept
+    in `requested_actor` so an unattributed row still says who asked.
+    """
+    if not actor or not isinstance(actor, str):
+        return None
+    key = actor.strip().lower()
+    if not key or key in AUDIENCE_TOKENS:
+        return None
+    if key in KNOWN_AGENTS:
+        return KNOWN_AGENTS[key]
+    root = key.split("/")[0]
+    if root in KNOWN_AGENTS:
+        return KNOWN_AGENTS[root]
+    return None
+
+
+def generate_from_chron_events(actor: Optional[str] = None) -> list[dict]:
     """Generate falsifiable predictions from chron_events.json.
 
     Reads the `predictions[]` array on each event. Each entry carries:
@@ -1192,7 +1236,9 @@ def generate_from_chron_events() -> list[dict]:
                     source_refs=source_refs,
                     success_rule=success_rule,
                     falsification_rule=falsification_rule,
-                    created_by="chron_prediction.generate_from_chron_events",
+                    created_by=(resolve_caller_actor(actor) or "chron_prediction.generate_from_chron_events"),
+                    provenance_module="chron_prediction.generate_from_chron_events",
+                    requested_actor=actor or None,
                     trigger="manual_generate",
                     loop_id=None,
                     # ── Learning-hop audit trail (2026-09-21) ──
@@ -1267,7 +1313,9 @@ def generate_from_chron_events() -> list[dict]:
             source_refs=[event.get("source", "")] if event.get("source") else [],
             success_rule=f"Event '{title}' occurs by {target_date_str}",
             falsification_rule=f"Event '{title}' does not occur by {target_date_str}",
-            created_by="chron_prediction.generate_from_chron_events",
+            created_by=(resolve_caller_actor(actor) or "chron_prediction.generate_from_chron_events"),
+            provenance_module="chron_prediction.generate_from_chron_events",
+            requested_actor=actor or None,
             trigger="manual_generate",
             loop_id=None,
             # ── Learning-hop audit trail (2026-09-21) ──
