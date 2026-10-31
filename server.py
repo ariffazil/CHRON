@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -504,10 +506,18 @@ def chron_temporal_briefing() -> dict:
 
 
 @mcp.tool()
-def chron_generate_predictions() -> dict:
+def chron_generate_predictions(actor: str = "") -> dict:
     """Generate predictions from chron_events.json.
 
     Creates prediction objects for events that don't have one yet.
+
+    `actor` — name yourself. Per-actor calibration (BL12) keys on the record's
+    authorship field, and until 2026-10-31 this function stamped that field with
+    its own module path, so every row resolved to UNATTRIBUTED and no actor
+    curve could ever accumulate. Pass a registered lane name (e.g. "hermes-asi",
+    "333-agi", "kimi-code"). An unregistered name is NOT invented into the
+    record — the row stays UNATTRIBUTED and keeps the request in
+    `requested_actor`. Unknown is honest; a guessed actor is a false witness.
 
     [F13 2026-10-21 — ruling sovereign] Penjanaan prediksi ialah kerja
     Execute ("kira penjanaan prediksi chron sebagai Execute, sebab itu
@@ -515,7 +525,7 @@ def chron_generate_predictions() -> dict:
     biar). Resit hanya bila prediksi BENAR-BENAR dijana — run kosong tidak
     dikira (jangan kembangkan kaunter tanpa output).
     """
-    new_preds = generate_from_chron_events()
+    new_preds = generate_from_chron_events(actor=actor or None)
     n = len(new_preds)
     if n > 0:
         try:
@@ -2145,6 +2155,120 @@ def audit_prompt(scope: str = "store") -> str:
         "(5) proxy_reality pairs have observation coverage > 0. "
         "Report any drift, invariant violation, or empty proxy-reality pairs as HOLD."
     )
+
+
+# ───────────────────── TEMPORAL REALITY (P1, 2026-10-31) ─────────────────────
+# HERMES CONVERGENCE directive: ONE canonical live-time capability, owned by the
+# existing temporal substrate. No new organ, no second ledger.
+#
+# Why this exists: agent/system_prompt.py:500 stamps "Conversation started"
+# once per session and freezes it ("byte-stable across rebuilds"). Measured
+# 2026-10-31: the prompt said Friday 30 Oct while reality was Saturday 31 Oct,
+# 16h47m stale. A remembered clock is not an observed clock.
+#
+# Doctrine: model_generated is always false. The model may not author
+# observed_at. If synchronisation metadata cannot be obtained, say UNKNOWN
+# rather than inventing precision.
+
+_TZ_FILE = "/etc/timezone"
+
+
+def _read_timezone() -> str:
+    try:
+        tz = Path(_TZ_FILE).read_text(encoding="utf-8").strip()
+        if tz:
+            return tz
+    except OSError:
+        pass
+    env_tz = os.environ.get("TZ")
+    return env_tz if env_tz else "UNKNOWN"
+
+
+def _read_clock_metadata() -> dict:
+    """Stratum / offset / RMS from chrony when present. Never fabricate."""
+    meta = {"clock_source": "UNKNOWN", "sync_status": "UNKNOWN",
+            "stratum": None, "uncertainty_ms": None}
+    try:
+        out = subprocess.run(["chronyc", "tracking"], capture_output=True,
+                             text=True, timeout=5)
+        if out.returncode == 0 and out.stdout:
+            meta["clock_source"] = "chrony"
+            for line in out.stdout.splitlines():
+                if ":" not in line:
+                    continue
+                k, _, v = line.partition(":")
+                k, v = k.strip().lower(), v.strip()
+                if k == "stratum":
+                    try:
+                        meta["stratum"] = int(v)
+                    except ValueError:
+                        pass
+                elif k == "rms offset":
+                    # "0.000265998 seconds" -> milliseconds
+                    try:
+                        meta["uncertainty_ms"] = round(float(v.split()[0]) * 1000.0, 6)
+                    except (ValueError, IndexError):
+                        pass
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    try:
+        td = subprocess.run(["timedatectl", "show"], capture_output=True,
+                            text=True, timeout=5)
+        if td.returncode == 0:
+            for line in td.stdout.splitlines():
+                if line.startswith("NTPSynchronized="):
+                    meta["sync_status"] = ("SYNCHRONIZED" if line.split("=", 1)[1].strip() == "yes"
+                                           else "UNSYNCHRONIZED")
+                    if meta["clock_source"] == "UNKNOWN":
+                        meta["clock_source"] = "systemd-timesyncd"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return meta
+
+
+@mcp.tool()
+def chron_time_now() -> dict:
+    """Observe the live clock. Call this before ANY temporal claim.
+
+    Reads the clock on every invocation — never cached, never derived from the
+    session prompt. Use monotonic_ns for elapsed duration and timeouts; use the
+    wall-clock fields for human and UTC timestamps.
+
+    A frozen session anchor is a remembered clock. This tool is the observed one.
+    """
+    from zoneinfo import ZoneInfo
+
+    now_utc = datetime.now(timezone.utc)
+    tz_name = _read_timezone()
+    try:
+        local = now_utc.astimezone(ZoneInfo(tz_name))
+        tz_repr = tz_name
+    except Exception:
+        local = now_utc.astimezone()
+        tz_repr = "UNKNOWN"
+
+    offset = local.strftime("%z")
+    offset_fmt = f"{offset[:3]}:{offset[3:]}" if len(offset) == 5 else offset
+    meta = _read_clock_metadata()
+
+    return {
+        "observed_at_utc": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "observed_at_local": local.isoformat(timespec="seconds"),
+        "timezone": tz_repr,
+        "utc_offset": offset_fmt,
+        "clock_source": meta["clock_source"],
+        "sync_status": meta["sync_status"],
+        "stratum": meta["stratum"],
+        "uncertainty_ms": meta["uncertainty_ms"],
+        "monotonic_ns": time.monotonic_ns(),
+        "ttl_seconds": 0,
+        "model_generated": False,
+        "session_anchor_semantics": (
+            "The system prompt line 'Conversation started' is SESSION_STARTED_AT, "
+            "not current time. It is intentionally frozen for prompt-cache stability."
+        ),
+    }
 
 
 # ───────────────────────── MAIN ─────────────────────────
