@@ -22,6 +22,29 @@ EXIT CODES
   0 ok / already-bound      1 usage or internal error
   2 REJECTED (malformed lesson)        3 UNKNOWN (unsupported lesson)
 
+PROVENANCE (P1 correction, ARIF 2026-11-02)
+  Inline provenance    = declared on the lesson row itself (basis/method/source_kind).
+  Reference provenance = resolved through prediction_ids looked up in the
+                         predictions ledger; recorded at bind time in
+                         binding.provenance.resolved_prediction_ids.
+  Effects on binding validity (no silent repair; lessons.jsonl is never written):
+    missing source       -> id listed under unresolved_prediction_ids; a binding
+                            is created only when >=1 reference resolves OR a
+                            declared provenance field exists; otherwise UNKNOWN
+                            and nothing is recorded.
+    ambiguous lesson_id  -> several rows for one id: the latest NON-SUPERSEDED
+                            row by created_at binds; lesson_created_at and
+                            lesson_fingerprint are captured as the anchor.
+                            Later rows do not silently rebind — drift must be
+                            read against the anchor, not re-derived.
+    duplicated lesson_id -> one binding per id (ALREADY_BOUND); superseded twins
+                            collapse into the single live row.
+    changed source       -> resolution is EXISTENCE-based, not content-hash
+                            based: a prediction edited after binding keeps its id
+                            valid while its content drifts UNDETECTED here.
+    missing lesson_id    -> exact string match only; no ID normalization, no
+                            repair, no mutation of any lesson row.
+
 Subcommands:
   bind --lesson-id ID --test-id TID --criterion TEXT --since DATE
        [--command CMD] [--subject TEXT]
@@ -193,10 +216,17 @@ def cmd_run(args: argparse.Namespace) -> int:
             exit_code = proc.returncode
             ok = exit_code == 0
             tail = [l for l in (proc.stdout or "").splitlines() if l.strip()][-4:]
-            outcome = " | ".join(tail)[:800]
+            joined = " | ".join(tail)
+            try:
+                # A JSON verdict must stay WHOLE: truncating it mid-string would
+                # cut the acceptance semantics out of the witness record.
+                json.loads(joined)
+                outcome = joined
+            except Exception:
+                outcome = joined[:2000]
             if not ok:
                 err = [l for l in (proc.stderr or "").splitlines() if l.strip()][-2:]
-                outcome = (outcome + " || ERR: " + " | ".join(err))[:800]
+                outcome = (outcome + " || ERR: " + " | ".join(err))[:2400]
         except Exception as exc:
             outcome = f"runner error: {type(exc).__name__}: {exc}"[:400]
 
@@ -270,16 +300,47 @@ def cmd_check_range_snapshot(args: argparse.Namespace) -> int:
             backlog.append(
                 str(p.get("prediction_id"))
             )  # pre-lesson legacy, reported not failed
+    uptake = in_scope - len(violations)
+    zero_sample = in_scope == 0
     verdict = {
         "test": "check-range-snapshot",
         "since": since,
         "range_claims_in_scope": in_scope,
+        # ZERO-SAMPLE EXPOSURE (P1 correction, ARIF 2026-11-02): an empty
+        # eligible set must never read as demonstrated uptake.
+        "eligible_observation_count": in_scope,
+        "uptake_observation_count": uptake,
         "violations": violations,
         "pre_since_backlog_spotless": backlog,
         "result": "PASS" if not violations else "FAIL",
+        "acceptance_semantics": {
+            "command_execution_success": {
+                "status": "PER_EXECUTION_FIELD",
+                "note": "exit status of this command only; never uptake, never acceptance",
+            },
+            "fixture_sensitivity": {
+                "status": "DEMONSTRATED_ON_FIXTURES",
+                "evidence": "tests/test_lesson_uptake.py — synthetic fixtures, not live evidence",
+            },
+            "live_evaluation_coverage": {
+                "status": "ZERO_ELIGIBLE_OBSERVATIONS"
+                if zero_sample
+                else "ELIGIBLE_OBSERVATIONS_PRESENT",
+                "eligible_observation_count": in_scope,
+            },
+            "observed_lesson_uptake": {
+                "status": "UNDETERMINED_ZERO_ELIGIBLE_OBSERVATIONS"
+                if zero_sample
+                else ("OBSERVED" if uptake == in_scope else "PARTIAL_OR_VIOLATING"),
+                "uptake_observation_count": uptake,
+            },
+            "human_acceptance": {"status": "AWAITING_HUMAN", "value": None},
+        },
         "note": (
             "FAIL blocks acceptance of the bound lesson's uptake, not the lesson itself; "
-            "the lesson row is never modified by this test."
+            "the lesson row is never modified by this test. "
+            "PASS with eligible_observation_count=0 means the test is armed, NOT that "
+            "uptake was observed."
         ),
     }
     print(json.dumps(verdict, sort_keys=True))

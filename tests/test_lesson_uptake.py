@@ -289,3 +289,40 @@ def test_check_range_snapshot_fails_on_violation_and_flags_backlog(env, capsys):
     assert out["pre_since_backlog_spotless"] == [
         "pred-fixture-3"
     ]  # legacy visible, not failed
+    # P1 correction (ARIF 2026-11-02): sample size + five-way acceptance semantics
+    assert out["eligible_observation_count"] == 2  # both in-scope range claims
+    assert out["uptake_observation_count"] == 1  # only the spot-checked one
+    sem = out["acceptance_semantics"]
+    assert sem["live_evaluation_coverage"]["eligible_observation_count"] == 2
+    assert sem["observed_lesson_uptake"]["status"] == "PARTIAL_OR_VIOLATING"
+    assert sem["human_acceptance"]["value"] is None
+    assert sem["command_execution_success"]["status"] == "PER_EXECUTION_FIELD"
+
+
+def test_1b_zero_sample_exposes_zero_eligible_never_uptake(env, capsys, tmp_path):
+    """eligible_observation_count=0 must read as UNDETERMINED, never as uptake."""
+    only_legacy = tmp_path / "preds_zero.jsonl"
+    only_legacy.write_text(json.dumps(PREDICTIONS[2]) + "\n")  # pre-since row only
+    rc = lu.main(
+        [
+            "check-range-snapshot",
+            "--since",
+            "2026-11-01",
+            "--predictions",
+            str(only_legacy),
+            "--lessons",
+            str(env["lessons"]),
+        ]
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert rc == lu.EXIT_OK
+    assert out["eligible_observation_count"] == 0
+    assert out["uptake_observation_count"] == 0
+    sem = out["acceptance_semantics"]
+    assert sem["live_evaluation_coverage"]["status"] == "ZERO_ELIGIBLE_OBSERVATIONS"
+    assert (
+        sem["observed_lesson_uptake"]["status"]
+        == "UNDETERMINED_ZERO_ELIGIBLE_OBSERVATIONS"
+    )
+    assert sem["human_acceptance"]["value"] is None
+    assert "armed, NOT that" in out["note"]
