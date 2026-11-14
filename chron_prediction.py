@@ -12,7 +12,6 @@ DITEMPA BUKAN DIBERI ⚒️
 from __future__ import annotations
 
 import json
-import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -120,15 +119,6 @@ def create_prediction(
     trigger: str = "manual",
     loop_id: Optional[str] = None,
     audience: str = "both",
-    # ── R-FILTER SCHEMA BUMP (2026-10-03) ──────────────────────────────────
-    # Companion to rationality-filter-doctrine.md. Optional list of classes
-    # for predictions that depend on data the corpus systematically
-    # underrepresents (gut instinct, leader decisions, private relationships,
-    # scar revisions). When non-empty, confidence is clamped to the
-    # corresponding ceiling — the model cannot claim high confidence on
-    # data it cannot see. See Q-MAP §13 (R-FILTER theorem).
-    rationality_filter_class: Optional[list[str]] = None,
-    rationality_filter_confidence_ceiling: float = 0.65,
     **extra,
 ) -> dict:
     """Create a new prediction object.
@@ -163,16 +153,6 @@ def create_prediction(
         "world_state_hash": world_state_hash,
         "success_rule": success_rule,
         "falsification_rule": falsification_rule,
-        # ── R-FILTER provenance (immutable) — 2026-10-03 schema bump ─────
-        # R-FILTER theorem: a prediction whose class depends on private data
-        # cannot carry confidence above the class ceiling. The clamp happens
-        # at birth, not at read time — the birth record is the witness.
-        "rationality_filter_class": list(rationality_filter_class or []),
-        "rationality_filter_confidence_ceiling": (
-            rationality_filter_confidence_ceiling
-            if (rationality_filter_class)
-            else 1.0
-        ),
         # ── Provenance (immutable) ──
         "source": source,
         "source_id": source_id,
@@ -187,7 +167,9 @@ def create_prediction(
         # and no explicit human-witness audience is UNBOUND, not ACTIVE.
         # Cron cannot close a door that was never attached.
         "status": (
-            "ACTIVE" if (extra.get("probe_id") or audience == "arif") else "UNBOUND"
+            "ACTIVE"
+            if (extra.get("probe_id") or audience == "arif")
+            else "UNBOUND"
         ),
         "binding": extra.get("probe_id")
         or ("HUMAN_WITNESS" if audience == "arif" else "NO_MACHINE_PROBE"),
@@ -205,19 +187,6 @@ def create_prediction(
         "lesson_id": None,
         "supersedes": None,
     }
-    # R-FILTER confidence clamp (2026-10-03 schema bump): if a non-empty
-    # rationality_filter_class is present, confidence may not exceed the
-    # class ceiling. This is the operational form of the theorem that says
-    # the model cannot claim high confidence on data the corpus systematically
-    # underrepresents. The clamp writes the witness into the birth record,
-    # not the read surface.
-    rfc = pred.get("rationality_filter_class") or []
-    if rfc:
-        ceiling = pred.get("rationality_filter_confidence_ceiling", 0.65)
-        if pred["confidence"] > ceiling:
-            pred["confidence"] = ceiling
-            pred["_rfilter_clamped"] = True
-
     pred.update(extra)
     save_prediction(pred)
 
@@ -479,8 +448,9 @@ def get_verified(limit: int = 50, include_void: bool = False) -> list[dict]:
                 "observed_outcome": verif.get("observed_outcome"),
                 "brier_score": verif.get("brier_score"),
                 "error": verif.get("error"),
-                "error_type": verif.get("error_type")
-                or ("UNKNOWN" if verdict == VERDICT_UNVERIFIABLE else "NONE"),
+                "error_type": verif.get("error_type") or (
+                    "UNKNOWN" if verdict == VERDICT_UNVERIFIABLE else "NONE"
+                ),
             }
         )
 
@@ -548,11 +518,7 @@ def verify_prediction(
         error = 0.0 if correct else 1.0
         if correct:
             error_type = "NONE"
-        elif error_class and str(error_class).strip().upper() not in (
-            "",
-            "NONE",
-            "UNKNOWN",
-        ):
+        elif error_class and str(error_class).strip().upper() not in ("", "NONE", "UNKNOWN"):
             # Honour the class the evidence path measured.
             error_type = str(error_class).strip().upper()
         else:
@@ -580,77 +546,16 @@ def verify_prediction(
     }
 
 
-# ── Structural error taxonomy (2026-10-02) ─────────────────────────────────
-# Fallback classifier inputs are BIRTH-side fields only — the verification
-# path honours evidence-measured error_class BEFORE reaching here.
-#
-# RANGE_STALE_AT_MINT enforces the sealed Brent lesson (pred-a1210fe9e53c:
-# "Brent 65–75" minted while spot was 98.3 → "range predictions must be
-# spot-checked against live price at creation"). Naming the cause is what
-# makes the lesson promotable — UNKNOWN-class lessons are diagnostics by
-# design (chron_loop_close arrow_memory_to_policy).
-_RANGE_SUBJECT_RE = re.compile(
-    r"\b(brent|wti|crude|oil|gas|xau|gold|silver|usd|myr|sgd|ron\s?95|ron97|"
-    r"diesel|klci|nasdaq|snp|price|index|yield|rate)\b",
-    re.IGNORECASE,
-)
-_RANGE_CLAIM_RE = re.compile(
-    r"\b(between|under|below|above|at least|at most|no more than|"
-    r"no less than|within the range|range of)\b"
-    r"|[≤≥]\s?\d|\d\s?[-–]\s?\d",
-    re.IGNORECASE,
-)
-
-
 def _classify_error(prediction: dict) -> str:
-    """Classify why a prediction was wrong.
-
-    Priority (honoured upstream before this fallback is reached):
-      1. ``error_class`` measured by the evidence path (chron_verify)
-      2. this structural fallback from birth-side fields only
-
-    Structural classes:
-      ASSUMPTION_ERROR     — assumptions were recorded and one broke
-      RANGE_STALE_AT_MINT  — threshold/range claim on a live-market subject
-                             with no assumptions and no mint-time market
-                             evidence; the range was stale before the clock
-                             started (proven: pred-a1210fe9e53c Brent 65–75
-                             vs spot 98.3; fuel-window family)
-      UNKNOWN              — honest floor; insufficient signal is never
-                             forced into a class
-    """
-    if prediction.get("assumptions"):
-        return "ASSUMPTION_ERROR"
-
-    claim = " ".join(
-        str(prediction.get(k) or "") for k in ("claim", "expected_outcome")
-    )
-    has_range_shape = bool(_RANGE_CLAIM_RE.search(claim))
-    market_subject = bool(_RANGE_SUBJECT_RE.search(claim))
-    # Mint-time market evidence appears as an evidence_snapshot entry whose
-    # evidence_class is richer than a bare EVENT_REFERENCE (e.g. MARKET_PROBE).
-    snap = prediction.get("evidence_snapshot") or []
-    mint_market_evidence = any(
-        isinstance(e, dict)
-        and str(e.get("evidence_class", "")).upper() not in ("", "EVENT_REFERENCE")
-        for e in snap
-    )
-    if has_range_shape and market_subject and not mint_market_evidence:
-        return "RANGE_STALE_AT_MINT"
-    return "UNKNOWN"
+    """Classify why a prediction was wrong."""
+    if not prediction.get("assumptions"):
+        return "UNKNOWN"
+    # Default — more specific classification needs domain context
+    return "ASSUMPTION_ERROR"
 
 
 # ───────────────────────── CALIBRATION ─────────────────────────
 
-
-# NOTE: GUT-OVERRIDE LEDGER (GOL) functions live canonically in
-# chron.chron_gut_override. The duplicate block that previously lived
-# here (added during the 2026-10-04 FI-008 audit response) was
-# removed 2026-10-07 because no caller imports these names from
-# chron_prediction (chron_cron_verify and production code import
-# from chron.chron_gut_override only). Anti-Bangang LAW 8 forbids
-# duplicate governance surfaces. Canonical spec:
-#   /root/AAA/instructions/gut-override-ledger-spec.md
 
 def compute_calibration() -> dict:
     """Compute calibration statistics over decided predictions.
@@ -784,7 +689,6 @@ INTERPRETABLE_ERROR_TYPES = (
     "MODEL_ERROR",
     "REGIME_CHANGE",
     "AWAITING_EVIDENCE",
-    "RANGE_STALE_AT_MINT",  # 2026-10-02: structural fallback class (sealed Brent lesson)
 )
 
 
@@ -913,13 +817,7 @@ def recalibrate_confidence(
 
     if quality == QUALITY_NONE:
         return _outcome(
-            p,
-            False,
-            0.5,
-            None,
-            0.0,
-            0.0,
-            False,
+            p, False, 0.5, None, 0.0, 0.0, False,
             "no decisive verdicts — calibration store empty; proposal passed through unaltered",
         )
 
@@ -930,13 +828,7 @@ def recalibrate_confidence(
         # cannot attribute a single failure to skill. Applying a correction here
         # would be acting on evidence that does not exist.
         return _outcome(
-            p,
-            False,
-            0.5,
-            snapshot.get("bias"),
-            0.0,
-            0.0,
-            False,
+            p, False, 0.5, snapshot.get("bias"), 0.0, 0.0, False,
             "calibration quality INSUFFICIENT: no interpretable outcome — "
             "correction withheld rather than applied on an unmeasurable base rate",
         )
@@ -951,11 +843,9 @@ def recalibrate_confidence(
         # silent fallback here would make an overconfident store look unbiased —
         # the one error this function exists to prevent.
         mc = snapshot.get("mean_confidence")
-        bias = (
-            (float(mc) - float(accuracy))
-            if (mc is not None and accuracy is not None)
-            else None
-        )
+        bias = (float(mc) - float(accuracy)) if (
+            mc is not None and accuracy is not None
+        ) else None
     else:
         bias = float(bias)
     delta = bias if (not skill_usable and bias is not None) else 0.0
@@ -981,9 +871,7 @@ def recalibrate_confidence(
             f"at evidence weight {w:.4f}"
         )
         if abs(shift) <= 1e-12:
-            why += (
-                "; shift is zero — the proposal already equals the measured base rate"
-            )
+            why += "; shift is zero — the proposal already equals the measured base rate"
     if capped:
         why += f"; shift capped at {cap:.4f}"
 
@@ -1191,29 +1079,13 @@ def generate_from_chron_events() -> list[dict]:
         if dedup_key in existing_keys:
             continue
 
-        # PREDICTED was MISSING from this map until 2026-10-03 (FI-003, D3).
-        # It fell through to the 0.5 default while TENTATIVE scored 0.6, so the
-        # weakest label calibrated ABOVE an actual forecast. Measured effect on
-        # the 2026-10-03 AGI branch set: branch C (asserted amplitude 0.25) and
-        # branch E (0.30) both landed at confidence 0.5412, while branch A
-        # (0.55) landed LOWER at 0.4942 — the ordering inverted, so Brier
-        # scoring would have penalised the confident branch least.
         confidence_map = {
             "CONFIRMED": 0.9,
-            "ANNOUNCED": 0.8,
             "LIKELY": 0.7,
-            "PREDICTED": 0.65,
+            "ANNOUNCED": 0.8,
             "TENTATIVE": 0.6,
         }
-        # An explicit numeric amplitude always wins over the enum. The enum is a
-        # coarse label; the amplitude is the actual claim being scored. Without
-        # this the forecaster's real probability is discarded before
-        # confidence_proposed and the calibrator cannot discriminate.
-        amp = event.get("amplitude")
-        if isinstance(amp, (int, float)) and not isinstance(amp, bool) and 0.0 <= float(amp) <= 1.0:
-            proposed = float(amp)
-        else:
-            proposed = float(confidence_map.get(event.get("confidence", ""), 0.5))
+        proposed = float(confidence_map.get(event.get("confidence", ""), 0.5))
         outcome = recalibrate_confidence(proposed, snapshot)
 
         pred = create_prediction(
@@ -1269,6 +1141,8 @@ def _load_lessons_for_generation() -> list[dict]:
     try:
         from chron.chron_learn import load_lessons, is_actionable_lesson
 
-        return [{**l, "actionable": is_actionable_lesson(l)} for l in load_lessons()]
+        return [
+            {**l, "actionable": is_actionable_lesson(l)} for l in load_lessons()
+        ]
     except Exception:  # noqa: BLE001
         return []

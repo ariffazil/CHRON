@@ -3,7 +3,7 @@
 Exposes CHRON's prediction, verification, calibration, episode,
 lesson, proxy-reality, and attention-debt stores as MCP tools.
 
-20 tools · 8 resources · 4 prompts · v4.1.0 (2026-10-06 — chron_frame_witness bridge lit)
+19 tools · 8 resources · 4 prompts · v4.0.6 (2026-09-28)
 
 Arrow of Time lifecycle:
     Event → Prediction → Verification → Error → Lesson → Policy
@@ -29,9 +29,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastmcp import FastMCP
-
-#: Event store used by chron_resolve_event (module constant: tests monkeypatch this).
-CHRON_EVENTS_STORE = Path("/root/AAA/scripts/chron_events.json")
 
 from chron.chron_store import (
     get_store,
@@ -72,14 +69,6 @@ from chron.chron_proxy_reality import (
     compute_all as pr_compute_all,
     seed_defaults as pr_seed_defaults,
 )
-from chron.chron_frame import (
-    request_witness as fw_request,
-    check_witness_results as fw_results,
-    record_witness_result as fw_record,
-    FRAME_URL,
-)
-import urllib.request
-import urllib.error
 from enum import Enum
 
 
@@ -127,13 +116,10 @@ class EventKind(str, Enum):
 
 mcp = FastMCP(
     "CHRON",
-    version="4.1.0",
     instructions=(
-        "CHRON — Temporal Consequence Tracker. v4.1.0. "
-        "20 tools across the Arrow of Time: Event → Prediction → Verification → "
+        "CHRON — Temporal Consequence Tracker. v4.0.6. "
+        "19 tools across the Arrow of Time: Event → Prediction → Verification → "
         "Error → Lesson. Predicts, verifies, calibrates, learns. "
-        "chron_frame_witness bridges the independent FRAME witness (separation of "
-        "powers: FRAME observes from outside, arifOS adjudicates). "
         "Not a scheduler. Not a memory store. "
         "The organ that answers: What did we expect? What happened? Were we wrong? "
         "What did we learn? Are our proxies gaming us?"
@@ -727,7 +713,6 @@ def chron_index_resource() -> str:
                 "chron_reconcile_state",
                 "chron_record_verification",
                 "chron_resolve_unverifiable",
-                "chron_resolve_event",
                 "chron_store_stats",
                 "chron_temporal_briefing",
                 "chron_verified_predictions",
@@ -1093,97 +1078,6 @@ def chron_resolve_unverifiable(
 
 
 @mcp.tool()
-def chron_resolve_event(
-    event_id: str,
-    observed_outcome: str,
-    evidence_ref: str,
-) -> dict:
-    """Resolve a chron EVENT (not a prediction) with mandatory evidence.
-
-    Closes the event-closure gap (REALITY-CLOSURE-PROTOCOL v0.1, F13-ratified
-    2026-10-07): preregistration anchors and sovereign commitments mint no
-    predictions, so prediction-arrow discharge can never reach them. A resolved
-    event exits attention-debt minting but stays in the ledger (no delete).
-
-    Args:
-        event_id: Event id in chron_events.json.
-        observed_outcome: What actually happened (free text).
-        evidence_ref: File path, sha256, or receipt id — REQUIRED (F2).
-    """
-    if not (evidence_ref or "").strip():
-        return {
-            "_is_error": True,
-            "error_code": "EVIDENCE_REQUIRED",
-            "error": "chron_resolve_event requires evidence_ref (path, sha256, or receipt id)",
-            "query_time": _now_iso(),
-        }
-    events_path = CHRON_EVENTS_STORE
-    if not events_path.exists():
-        return {
-            "_is_error": True,
-            "error_code": "EVENTS_FILE_MISSING",
-            "error": f"{events_path} not found",
-            "query_time": _now_iso(),
-        }
-    data = json.loads(events_path.read_text())
-    events = data.get("events", [])
-    evt = next((e for e in events if e.get("id") == event_id), None)
-    if evt is None:
-        return {
-            "_is_error": True,
-            "error_code": "EVENT_NOT_FOUND",
-            "error": f"Event {event_id} not found",
-            "query_time": _now_iso(),
-        }
-    if evt.get("resolution"):
-        return {
-            "status": "ALREADY_RESOLVED",
-            "event_id": event_id,
-            "resolution": evt["resolution"],
-            "query_time": _now_iso(),
-        }
-    evt["resolution"] = {
-        "outcome": observed_outcome,
-        "evidence_ref": evidence_ref.strip(),
-        "resolved_at": _now_iso(),
-        "resolved_by": "chron_resolve_event",
-    }
-    tmp = events_path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-    tmp.replace(events_path)
-
-    # Close persisted OPEN debt items minted from this event. Append-only:
-    # rows flip OPEN -> RESOLVED with a resolution note; history is retained.
-    debt_closed, debt_error = [], None
-    try:
-        from chron.chron_attention_debt import _load_all_debt, _resolve_debt
-
-        for it in _load_all_debt():
-            if (
-                it.get("source") == "unresolved_event"
-                and it.get("ref_id") == event_id
-                and it.get("status") == "OPEN"
-            ):
-                if _resolve_debt(
-                    it.get("debt_id"),
-                    f"event resolved: {observed_outcome[:120]} | evidence: {evidence_ref[:120]}",
-                ):
-                    debt_closed.append(it.get("debt_id"))
-    except Exception as exc:  # event resolution already persisted — report, never hide
-        debt_error = f"{type(exc).__name__}: {exc}"
-
-    return {
-        "status": "RESOLVED",
-        "event_id": event_id,
-        "resolution": evt["resolution"],
-        "debt_items_closed": debt_closed,
-        "debt_ledger_error": debt_error,
-        "note": "exits attention-debt minting; ledger retained (append-only discipline)",
-        "query_time": _now_iso(),
-    }
-
-
-@mcp.tool()
 def chron_create_event(
     event_id: str,
     title: str,
@@ -1195,7 +1089,6 @@ def chron_create_event(
     confidence: str = "TENTATIVE",
     consequence: str = "MEDIUM",
     actionability: str = "WATCH",
-    amplitude: float | None = None,
 ) -> dict:
     """Create a new event in chron_events.json — plant a temporal stake.
 
@@ -1214,14 +1107,6 @@ def chron_create_event(
         confidence: CONFIRMED / LIKELY / ANNOUNCED / PREDICTED / TENTATIVE
         consequence: HIGH / MEDIUM / LOW
         actionability: PREPARE / WATCH / MONITOR
-        amplitude: Optional numeric probability in [0.0, 1.0] for a forecast.
-            When supplied it becomes the generated prediction's
-            confidence_proposed verbatim, OVERRIDING the coarse `confidence`
-            enum. This is what lets a superposition of competing branches keep
-            its discrimination through recalibration and Brier scoring — without
-            it every forecast collapses onto the enum default and the calibrator
-            cannot tell a 0.25 claim from a 0.55 claim. Omit for non-forecast
-            events (birthdays, deadlines, fiscal windows).
     """
     chron_events_path = Path("/root/AAA/scripts/chron_events.json")
     if not chron_events_path.exists():
@@ -1261,24 +1146,6 @@ def chron_create_event(
         "note": note,
     }
 
-    # Amplitude is optional and validated at the boundary: an out-of-range or
-    # non-numeric value is a caller bug, and silently clamping it would forge a
-    # probability the forecaster never asserted.
-    if amplitude is not None:
-        try:
-            amp = float(amplitude)
-        except (TypeError, ValueError):
-            return {
-                "error": f"amplitude must be numeric, got {amplitude!r}",
-                "query_time": _now_iso(),
-            }
-        if not 0.0 <= amp <= 1.0:
-            return {
-                "error": f"amplitude must be within [0.0, 1.0], got {amp}",
-                "query_time": _now_iso(),
-            }
-        new_event["amplitude"] = amp
-
     events.append(new_event)
     data["events"] = events
     data["_updated"] = datetime.now(MYT).strftime("%Y-%m-%d")
@@ -1289,7 +1156,6 @@ def chron_create_event(
         "event_id": event_id,
         "title": title,
         "target_date": target_date,
-        "amplitude": new_event.get("amplitude"),
         "total_events": len(events),
         "query_time": _now_iso(),
     }
@@ -1423,132 +1289,6 @@ def chron_proxy_reality_state(organ: str = "", window: int = 5) -> dict:
     }
 
 
-@mcp.tool()
-def chron_frame_witness(
-    action: str = "witness",
-    claims: list | None = None,
-    claim_id: str = "",
-) -> dict:
-    """Independent witness bridge — have FRAME (outside CHRON) mechanically check atomic claims.
-
-    Separation of powers (constitution): CHRON owns the temporal ledger; FRAME is the
-    independent witness and can say CHRON is wrong. FRAME observes, never executes,
-    and returns evidence only — VERIFIED / CONTRADICTED / UNVERIFIABLE / STALE / EACCES.
-    It NEVER returns SEAL/HOLD; adjudication stays with arifOS.
-
-    Use before recording a verification, when a claim's evidence should be checked by
-    a process that did not author it, or whenever CHRON state must be witnessed from
-    outside its own walls.
-
-    Args:
-        action: 'witness' — submit claims to FRAME's mechanical checker;
-                'results' — read recorded witness results (optionally filtered).
-        claims: list of {text, evidence:{check, path, field?, equals?, max_age_seconds?}}.
-                Evidence kinds: file_exists, file_fresh, json_field. Unpointed prose
-                is UNVERIFIABLE by design — fluency never certifies.
-        claim_id: optional filter for action='results'.
-
-    Returns:
-        For 'witness': FRAME's per-claim rows + rolled-up witness verdict
-        (CONFIRMED / CONTESTED / UNVERIFIABLE), evidence quality, contradictions,
-        confidence, and audit trail refs (frame_requests.jsonl / frame_results.jsonl).
-        For 'results': the recorded witness results.
-    """
-    if action == "results":
-        rows = fw_results(claim_id or None)
-        return {
-            "witness_results": rows,
-            "count": len(rows),
-            "query_time": _now_iso(),
-        }
-
-    if not isinstance(claims, list) or not claims:
-        return {
-            "error": "action='witness' requires claims: list[{text, evidence{check,...}}]",
-            "query_time": _now_iso(),
-        }
-
-    summary_text = "; ".join(str(c.get("text", ""))[:80] for c in claims[:5])
-    req = fw_request(
-        claim=summary_text or "unnamed claim set",
-        evidence=[json.dumps(c.get("evidence", {})) for c in claims[:20]],
-        source="chron_frame_witness",
-    )
-
-    try:
-        payload = json.dumps({"claims": claims}).encode()
-        http_req = urllib.request.Request(
-            f"{FRAME_URL}/frame/witness/claims",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(http_req, timeout=15) as resp:
-            frame_out = json.loads(resp.read())
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        return {
-            "error": f"FRAME unreachable at {FRAME_URL}: {exc}",
-            "request_logged": True,
-            "request": req,
-            "note": "witness request stays PENDING in frame_requests.jsonl",
-            "query_time": _now_iso(),
-        }
-
-    rows = frame_out.get("rows", [])
-    counts = frame_out.get("counts", {})
-    n_contradicted = counts.get("CONTRADICTED", 0)
-    n_verified = counts.get("VERIFIED", 0)
-    n_stale = counts.get("STALE", 0)
-    n_unverifiable = counts.get("UNVERIFIABLE", 0) + counts.get("EACCES", 0)
-
-    if n_contradicted:
-        verdict = "CONTESTED"
-    elif n_verified:
-        verdict = "CONFIRMED"
-    else:
-        verdict = "UNVERIFIABLE"
-
-    if n_unverifiable == 0 and n_contradicted == 0:
-        quality = "OBSERVED"
-    elif n_verified or n_stale:
-        quality = "INFERRED"
-    else:
-        quality = "SPECULATIVE"
-
-    contradictions = [
-        r.get("claim", "") for r in rows if r.get("status") == "CONTRADICTED"
-    ]
-    decided = n_verified + n_stale + n_contradicted + n_unverifiable
-    confidence = round(n_verified / decided, 3) if decided else 0.0
-
-    rec = fw_record(
-        claim=summary_text or "unnamed claim set",
-        verdict=verdict,
-        evidence_quality=quality,
-        contradictions=contradictions,
-        confidence=confidence,
-    )
-
-    return {
-        "witness_verdict": verdict,
-        "evidence_quality": quality,
-        "contradictions": contradictions,
-        "confidence": confidence,
-        "frame_counts": counts,
-        "rows": rows,
-        "discipline_note": frame_out.get(
-            "discipline_note",
-            "action-trace evidence outranks prose; FRAME never executes commands",
-        ),
-        "audit": {
-            "request_file": "frame_requests.jsonl",
-            "result_id": rec.get("result_id"),
-            "frame_url": f"{FRAME_URL}/frame/witness/claims",
-        },
-        "query_time": _now_iso(),
-    }
-
-
 # ───────────────────────── HELPERS ─────────────────────────
 
 
@@ -1621,40 +1361,27 @@ def _get_active_events_summary() -> list[dict]:
 # ───────────────────────── HEALTH ─────────────────────────
 
 
-# ── /health aggregate cache (2026-10-15) ──────────────────────────────────
-# /health recomputed aggregates over ~194k episodes on every call (~800ms,
-# 900× slower than every other organ). Bounded fix: 60s TTL cache with honest
-# sensor labeling — payload carries served/computed_at/age_s so a cached read
-# can never be mistaken for a live one. Writers untouched (zero mutation risk).
-_HEALTH_CACHE: dict = {"ts": 0.0, "payload": None}
-
-
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request):
     """Health endpoint for federation probing."""
-    import time as _time
-
     from starlette.responses import JSONResponse
 
-    _now = _time.time()
-    if _HEALTH_CACHE["payload"] is None or _now - _HEALTH_CACHE["ts"] > 60.0:
-        store = get_store()
-        preds = load_predictions()
-        calibration = compute_calibration()
-        active = get_active()
-        ledger = get_verified(limit=10000)
-        decisive = [v for v in ledger if _canonical_verdict(v) in _DECISIVE]
-        # Counted from the ledger, not from calibration: an explicitly closed-untestable
-        # arrow is finished-but-unscored and must never be conflated with a verifier's
-        # "evidence is late". Reading calibration here reported 0 for closures that existed.
-        awaiting = [v for v in ledger if _canonical_verdict(v) == VERDICT_UNVERIFIABLE]
-        closed_untestable = [
-            v for v in ledger if _canonical_verdict(v) == VERDICT_CLOSED_UNTESTABLE
-        ]
+    store = get_store()
+    preds = load_predictions()
+    calibration = compute_calibration()
+    active = get_active()
+    ledger = get_verified(limit=10000)
+    decisive = [v for v in ledger if _canonical_verdict(v) in _DECISIVE]
+    # Counted from the ledger, not from calibration: an explicitly closed-untestable
+    # arrow is finished-but-unscored and must never be conflated with a verifier's
+    # "evidence is late". Reading calibration here reported 0 for closures that existed.
+    awaiting = [v for v in ledger if _canonical_verdict(v) == VERDICT_UNVERIFIABLE]
+    closed_untestable = [v for v in ledger if _canonical_verdict(v) == VERDICT_CLOSED_UNTESTABLE]
 
-        ad_summary = get_ad_summary()
+    ad_summary = get_ad_summary()
 
-        payload = {
+    return JSONResponse(
+        {
             "status": "ok",
             "organ": "CHRON",
             "port": int(os.environ.get("CHRON_MCP_PORT", 18102)),
@@ -1672,10 +1399,6 @@ async def health(request):
                 "total_verified": calibration.get("total", 0),
                 "accuracy": calibration.get("accuracy"),
                 "mean_brier": calibration.get("mean_brier"),
-                # D4-PATCH-2026-10-07: surface Wilson CI + quality at /health.
-                "quality": calibration.get("quality"),
-                "accuracy_ci95": calibration.get("accuracy_ci95"),
-                "warnings": calibration.get("warnings", []),
             },
             "attention_debt": {
                 "total_ad": ad_summary.get("total_ad", 0),
@@ -1684,18 +1407,7 @@ async def health(request):
             },
             "query_time": _now_iso(),
         }
-        _HEALTH_CACHE["payload"] = payload
-        _HEALTH_CACHE["ts"] = _now
-        payload["cache"] = {"served": "live", "computed_at": payload["query_time"]}
-    else:
-        payload = dict(_HEALTH_CACHE["payload"])
-        payload["cache"] = {
-            "served": "cached",
-            "computed_at": _HEALTH_CACHE["payload"]["query_time"],
-            "age_s": round(_now - _HEALTH_CACHE["ts"], 1),
-        }
-
-    return JSONResponse(payload)
+    )
 
 
 # ───────────────────────── PROMPTS (Phase 4) ─────────────────────────
