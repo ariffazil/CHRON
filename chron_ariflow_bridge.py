@@ -13,6 +13,7 @@ DITEMPA BUKAN DIBERI ⚒️
 
 from __future__ import annotations
 
+import fcntl
 import json
 import subprocess
 import sys
@@ -170,7 +171,23 @@ def receipt_to_episode(receipt: dict) -> dict | None:
 
 
 def run_bridge() -> dict:
-    """Run the bridge: read new receipts, create episodes."""
+    """Run the bridge under an exclusive lock.
+
+    Two concurrent loop-closer runs (or a manual run beside the timer) used to
+    load the same offset, read the same lines and append the same receipts
+    twice. The offset file is also the lock: one writer at a time.
+    """
+    OFFSET_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(OFFSET_FILE, "a+") as lockf:
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+        try:
+            return _run_bridge_locked()
+        finally:
+            fcntl.flock(lockf, fcntl.LOCK_UN)
+
+
+def _run_bridge_locked() -> dict:
+    """Read new receipts and create episodes. Caller holds the offset lock."""
     if not RECEIPTS_FILE.exists():
         return {
             "status": "SKIP",
@@ -186,6 +203,17 @@ def run_bridge() -> dict:
         lines = f.readlines()
 
     total_lines = len(lines)
+
+    # A rotated/truncated file can leave offset > total_lines. Re-reading from
+    # zero is how the historical duplicates were born; refuse and report it.
+    if offset > total_lines:
+        return {
+            "status": "OFFSET_AHEAD",
+            "reason": "offset file is ahead of receipts file; refusing to re-read from 0",
+            "offset": offset,
+            "total_lines": total_lines,
+        }
+
     new_lines = lines[offset:]
 
     if not new_lines:

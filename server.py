@@ -3,7 +3,7 @@
 Exposes CHRON's prediction, verification, calibration, episode,
 lesson, proxy-reality, and attention-debt stores as MCP tools.
 
-19 tools · 8 resources · 4 prompts · v4.0.6 (2026-09-28)
+24 tools · 8 resources · 4 prompts · v4.2.0 (2026-11-18 — 24 tools + main reconciled)
 
 Arrow of Time lifecycle:
     Event → Prediction → Verification → Error → Lesson → Policy
@@ -19,9 +19,12 @@ DITEMPA BUKAN DIBERI ⚒️
 
 from __future__ import annotations
 
+import uuid
 import json
 import os
+import subprocess
 import sys
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -29,6 +32,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastmcp import FastMCP
+
+#: Event store used by chron_resolve_event (module constant: tests monkeypatch this).
+CHRON_EVENTS_STORE = Path("/root/chron/chron_events.json")
 
 from chron.chron_store import (
     get_store,
@@ -41,8 +47,10 @@ from chron.chron_prediction import (
     get_due,
     get_verified,
     compute_calibration,
+    save_calibration,
     load_predictions,
     generate_from_chron_events,
+    resolved_ids,
     _canonical_verdict,
     _DECISIVE,
     VERDICT_UNVERIFIABLE,
@@ -58,6 +66,9 @@ from chron.chron_prediction import (
     verify_prediction,
     create_prediction,
     resolution_states,
+    load_verifications,
+    load_corrections,
+    append_correction,
 )
 from chron.chron_episode import verify_from_result, predict_from_prediction
 from chron.chron_attention_debt import get_attention_debt, get_ad_summary
@@ -69,6 +80,14 @@ from chron.chron_proxy_reality import (
     compute_all as pr_compute_all,
     seed_defaults as pr_seed_defaults,
 )
+from chron.chron_frame import (
+    request_witness as fw_request,
+    check_witness_results as fw_results,
+    record_witness_result as fw_record,
+    FRAME_URL,
+)
+import urllib.request
+import urllib.error
 from enum import Enum
 
 
@@ -116,10 +135,13 @@ class EventKind(str, Enum):
 
 mcp = FastMCP(
     "CHRON",
+    version="4.2.0",
     instructions=(
-        "CHRON — Temporal Consequence Tracker. v4.0.6. "
-        "19 tools across the Arrow of Time: Event → Prediction → Verification → "
+        "CHRON — Temporal Consequence Tracker. v4.2.0. "
+        "23 tools across the Arrow of Time: Event → Prediction → Verification → "
         "Error → Lesson. Predicts, verifies, calibrates, learns. "
+        "chron_frame_witness bridges the independent FRAME witness (separation of "
+        "powers: FRAME observes from outside, arifOS adjudicates). "
         "Not a scheduler. Not a memory store. "
         "The organ that answers: What did we expect? What happened? Were we wrong? "
         "What did we learn? Are our proxies gaming us?"
@@ -149,9 +171,38 @@ def chron_predictions_due() -> dict:
     here represents an unpaid epistemic debt.
     """
     due = get_due()
+
+    # Unbound predictions never enter get_due() (status is UNBOUND, not ACTIVE),
+    # so without this counter they age silently forever: no verifier sees them,
+    # no debt is minted, and the arrow never closes. Expose them where agents
+    # look for temporal work, not only in the offline scanner.
+    now = datetime.now(timezone.utc)
+    resolved = resolved_ids()
+    stale_unbound = []
+    for p in load_predictions():
+        if p.get("status") != "UNBOUND" or p.get("prediction_id") in resolved:
+            continue
+        try:
+            verify_at = datetime.fromisoformat(
+                str(p.get("verify_at", "")).replace("Z", "+00:00")
+            )
+        except ValueError:
+            continue
+        if now >= verify_at:
+            stale_unbound.append(
+                {
+                    "prediction_id": p.get("prediction_id"),
+                    "claim": (p.get("claim") or "")[:160],
+                    "verify_at": p.get("verify_at"),
+                    "source_id": p.get("source_id"),
+                }
+            )
+
     return {
         "due": due,
         "count": len(due),
+        "stale_unbound": stale_unbound,
+        "stale_unbound_count": len(stale_unbound),
         "query_time": _now_iso(),
         "next_verify_at": _next_verify_at(),
     }
@@ -236,7 +287,7 @@ def chron_active_events(audience: AudienceFilter = AudienceFilter.all) -> dict:
     validation. Previously 'GARBAGE' silently returned the 'both' subset —
     a privacy bug. Now such requests are rejected at the protocol boundary.
     """
-    chron_events = Path("/root/AAA/scripts/chron_events.json")
+    chron_events = Path("/root/chron/chron_events.json")
     if not chron_events.exists():
         return {"events": [], "count": 0, "query_time": _now_iso()}
 
@@ -272,7 +323,7 @@ def _resolve_prediction_audience(pred: dict) -> str:
 
     receipt rcpt-2026-09-19-chron-audience-leak-fix
     evidence /root/chron/data/predictions.jsonl  (live store, read-only)
-    evidence /root/AAA/scripts/chron_events.json (event store, read-only)
+    evidence /root/chron/chron_events.json (event store, read-only)
 
     Resolution order:
       1. explicit `audience` on the prediction row
@@ -285,7 +336,7 @@ def _resolve_prediction_audience(pred: dict) -> str:
     sid = pred.get("source_id")
     if sid:
         try:
-            data = json.loads(Path("/root/AAA/scripts/chron_events.json").read_text())
+            data = json.loads(Path("/root/chron/chron_events.json").read_text())
             for e in data.get("events", []):
                 if e.get("id") == sid and e.get("audience") in ("arif", "syed", "both"):
                     return e["audience"]
@@ -459,12 +510,57 @@ def chron_temporal_briefing() -> dict:
 
 
 @mcp.tool()
-def chron_generate_predictions() -> dict:
+def chron_generate_predictions(actor: str = "") -> dict:
     """Generate predictions from chron_events.json.
 
     Creates prediction objects for events that don't have one yet.
+
+    `actor` — name yourself. Per-actor calibration (BL12) keys on the record's
+    authorship field, and until 2026-10-31 this function stamped that field with
+    its own module path, so every row resolved to UNATTRIBUTED and no actor
+    curve could ever accumulate. Pass a registered lane name (e.g. "hermes-asi",
+    "333-agi", "kimi-code"). An unregistered name is NOT invented into the
+    record — the row stays UNATTRIBUTED and keeps the request in
+    `requested_actor`. Unknown is honest; a guessed actor is a false witness.
+
+    [F13 2026-10-21 — ruling sovereign] Penjanaan prediksi ialah kerja
+    Execute ("kira penjanaan prediksi chron sebagai Execute, sebab itu
+    memang kerja dia yang hasilkan output sebenar" — bukan exemption, bukan
+    biar). Resit hanya bila prediksi BENAR-BENAR dijana — run kosong tidak
+    dikira (jangan kembangkan kaunter tanpa output).
     """
-    new_preds = generate_from_chron_events()
+    new_preds = generate_from_chron_events(actor=actor or None)
+    n = len(new_preds)
+    if n > 0:
+        try:
+            receipt = {
+                "receipt_id": str(uuid.uuid4()),
+                "created_at": _now_iso(),
+                "actor_id": "chron",
+                "session_id": f"chron-generate-{n}",
+                "step_type": "Execute",
+                "step_number": 0,
+                "cost_ns": 0,
+                "epistemic_label": "Observation",
+                "floor_verdict": "Pass",
+                "cooling_decision": "None",
+                "summary": (
+                    f"CHRON generate: {n} prediction(s) from chron_events — "
+                    "Execute per F13 ruling 2026-10-21"
+                ),
+                "routed_organ": "chron",
+                "payload": {"generated": n},
+            }
+            req = urllib.request.Request(
+                "http://127.0.0.1:7073/ingest",
+                data=json.dumps(receipt).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                pass
+        except Exception:
+            pass  # metabolism down must not kill generation
     return {
         "generated": len(new_preds),
         "predictions": new_preds,
@@ -477,6 +573,15 @@ def chron_record_verification(
     prediction_id: str,
     observed_outcome: str,
     correct: bool,
+    witness_claim_id: str = "",
+    criterion: str = "",
+    evidence_ref: str = "",
+    outcome_time: str = "",
+    observation_time: str = "",
+    coverage: str = "",
+    entailment: str = "",
+    resolver_id: str = "",
+    resolver_relation: str = "",
 ) -> dict:
     """Record a verification outcome for a prediction. CLOSES THE ARROW.
 
@@ -487,6 +592,11 @@ def chron_record_verification(
     whether the prediction was correct or incorrect. CHRON then computes
     the Brier score and writes a permanent verification record.
 
+    FRAME is NOT called automatically. To mark a verification as independently
+    witnessed, run chron_frame_witness first and pass its claim_id here. Without
+    it the verification is recorded as UNWITNESSED; with an unknown id it is
+    recorded as PENDING. This is a separation-of-powers marker, not a gate.
+
     After calling this, call chron_calibration_state() to see updated
     calibration, and chron_lessons() to check for extractable lessons.
 
@@ -494,6 +604,19 @@ def chron_record_verification(
         prediction_id: The prediction to verify (e.g. 'pred-b73cba59ab86')
         observed_outcome: What actually happened (free text — becomes evidence)
         correct: True if prediction was correct, False if incorrect
+        witness_claim_id: optional claim_id returned by chron_frame_witness
+        criterion: the original criterion being tested (text or field path)
+        evidence_ref: file path, URL, receipt id, or measurement identifier
+        outcome_time: when the event happened (ISO-8601)
+        observation_time: when the evidence became available (ISO-8601)
+        coverage: measurement window / limitations for absence claims
+        entailment: why this evidence entails YES or NO
+        resolver_id: who/what applied the criterion
+        resolver_relation: independent | same_agent | human_witness | machine_probe
+
+    Resolution completeness requires criterion, evidence_ref, outcome_time,
+    observation_time, entailment, and resolver_id. Missing either time marks
+    the record `time_status=COLLAPSED` and does not claim COMPLETE.
 
     Returns:
         Verification record with Brier score, verdict, and verification_id.
@@ -522,16 +645,105 @@ def chron_record_verification(
             "query_time": _now_iso(),
         }
 
-    # Build verification record (does NOT mutate original prediction)
-    verif_record = verify_prediction(pred, observed_outcome, correct)
+    # Build verification record (does NOT mutate original prediction).
+    # Class the failure AT THE CALL: verify_prediction honours error_class,
+    # and omitting it here was why the calibration ledger recorded UNKNOWN
+    # for causes the resolver had already measured (INVARIANT 2026-09-21,
+    # chron_prediction.verify_prediction — a measured class discarded at the
+    # call site is the same defect, one layer up). ASSUMPTION_ERROR is the
+    # handler's declared class for a wrong prediction whose evidence path
+    # named no narrower structural cause; the episode and receipt below
+    # declare the same value — one class, one source, written once.
+    error_class = "NONE" if correct else "ASSUMPTION_ERROR"
+    verif_record = verify_prediction(
+        pred, observed_outcome, correct, error_class=error_class
+    )
+
+    # Separation-of-powers marker: a verification is UNWITNESSED unless the
+    # caller links a FRAME claim_id. The witness is not called automatically
+    # because most observed_outcome text has no pointed evidence for FRAME to
+    # check; claiming otherwise would turn a manual bridge into a fake gate.
+    witness_status = "UNWITNESSED"
+    witness_verdict = None
+    witness_result_id = None
+    if witness_claim_id:
+        matches = [
+            r
+            for r in fw_results(witness_claim_id)
+            if r.get("claim_id") == witness_claim_id
+        ]
+        if matches:
+            latest = matches[-1]
+            witness_status = "WITNESSED"
+            witness_verdict = latest.get("verdict")
+            witness_result_id = latest.get("result_id")
+        else:
+            witness_status = "PENDING"
+
+    verif_record["witness_claim_id"] = witness_claim_id or None
+    verif_record["witness_status"] = witness_status
+    verif_record["witness_verdict"] = witness_verdict
+    verif_record["witness_result_id"] = witness_result_id
+
+    # Resolution provenance: a verdict is only auditable if a later reader can
+    # see what criterion was tested, which evidence was used, when reality
+    # changed vs when it was observed, and who applied the criterion. These
+    # fields are optional for backward compatibility; completeness is reported
+    # rather than assumed.
+    resolution = {
+        "criterion": criterion,
+        "evidence_ref": evidence_ref,
+        "outcome_time": outcome_time,
+        "observation_time": observation_time,
+        "coverage": coverage,
+        "entailment": entailment,
+        "resolver_id": resolver_id,
+        "resolver_relation": resolver_relation,
+    }
+    required = (
+        "criterion",
+        "evidence_ref",
+        "outcome_time",
+        "observation_time",
+        "entailment",
+        "resolver_id",
+    )
+    resolution["time_status"] = (
+        "FULL" if outcome_time and observation_time else "COLLAPSED"
+    )
+    resolution["completeness"] = (
+        "COMPLETE"
+        if all(str(resolution.get(k, "")).strip() for k in required)
+        else "PARTIAL"
+    )
+    verif_record["resolution"] = resolution
+
+    time_warning = None
+    if resolution["time_status"] == "COLLAPSED":
+        time_warning = (
+            "event/observation time missing; record time may be mistaken for event time"
+        )
 
     # Persist to verification_log.jsonl (APPEND-ONLY)
     _append_verification_record(verif_record)
 
-    # Create verify episode
+    # Keep the declared single source of truth (data/calibration.json) in step
+    # with the ledger. Before this, only the scheduled verifier wrote the file;
+    # a manual MCP verification left it stale while /health computed live
+    # (measured 2026-10-19: file n=35, live n=38). Never fail the verdict if the
+    # cache write fails — report it on the record instead.
+    calibration_synced = False
+    calibration_error = None
+    try:
+        save_calibration(compute_calibration())
+        calibration_synced = True
+    except Exception as exc:
+        calibration_error = f"{type(exc).__name__}: {exc}"
+
+    # Create verify episode — error_class already computed once above
+    # (single source: verification record, episode and receipt share it).
     store = get_store()
     error = 0.0 if correct else 1.0
-    error_class = "NONE" if correct else "ASSUMPTION_ERROR"
     ep = verify_from_result(pred, observed_outcome, error, error_class)
     store.append(ep)
 
@@ -554,6 +766,92 @@ def chron_record_verification(
         "observed_outcome": observed_outcome,
         "brier_score": verif_record["brier_score"],
         "verdict": verif_record["verdict"],
+        "witness_status": witness_status,
+        "witness_verdict": witness_verdict,
+        "witness_claim_id": witness_claim_id or None,
+        "resolution": resolution,
+        "time_warning": time_warning,
+        "calibration_synced": calibration_synced,
+        "calibration_error": calibration_error,
+        "query_time": _now_iso(),
+    }
+
+
+@mcp.tool()
+def chron_amend_verification(
+    prediction_id: str,
+    reason: str,
+    corrected_observed_outcome: str = "",
+    corrected_entailment: str = "",
+    corrected_coverage: str = "",
+    corrected_evidence_ref: str = "",
+    corrected_by: str = "",
+    evidence_ref: str = "",
+    supersedes_correction_id: str = "",
+) -> dict:
+    """AMEND THE STATED REASON of an existing verification. Verdict is immutable.
+
+    Why this exists (failure class, 2026-11-17): a verification recorded a verdict
+    with a reason that was later measured to be inaccurate — a wrong instrument (gate
+    events counted instead of the event the claim named), wrong numbers (a superseded
+    census), or an analogy presented as evidence. ``chron_record_verification`` is
+    idempotent and refuses to re-record (ALREADY_VERIFIED), so without this tool the
+    only options were to leave the stale reason in the reader's view or rewrite
+    history. Both are wrong.
+
+    This appends to ``data/verification_corrections.jsonl`` (APPEND-ONLY) and the
+    read surface (``chron_verified_predictions``) overlays the latest correction onto
+    ``observed_outcome`` / ``amendment``. The original verification record and its
+    numbers are untouched; ``supersedes_verification_id`` keeps lineage.
+
+    It NEVER changes verdict, Brier score, or calibration. A reason correction is not
+    a re-score. If the verdict itself is wrong, that is a retraction: append a VOID via
+    the verification path, then record fresh.
+
+    Args:
+        prediction_id: verified prediction whose reason is being corrected
+        reason: WHY the stated reason was wrong (required — no silent edits)
+        corrected_observed_outcome: the accurate account, replaces the reader's view
+        corrected_entailment: corrected why-this-entails-YES/NO
+        corrected_evidence_ref: corrected receipt/measurement pointer
+        corrected_by: who measured the defect (agent id)
+        evidence_ref: pointer to the audit/receipt that justifies the correction
+    """
+    if not reason.strip():
+        return {
+            "_is_error": True,
+            "error_code": "REASON_REQUIRED",
+            "error": "A correction without a stated reason is noise, not a correction.",
+            "query_time": _now_iso(),
+        }
+    verif = load_verifications().get(prediction_id)
+    if not verif:
+        return {
+            "_is_error": True,
+            "error_code": "NOT_VERIFIED",
+            "error": f"{prediction_id} has no verification record to amend",
+            "query_time": _now_iso(),
+        }
+    record = {
+        "correction_id": f"corr-{uuid.uuid4().hex[:12]}",
+        "prediction_id": prediction_id,
+        "supersedes_verification_id": verif.get("verification_id"),
+        "verdict_unchanged": _canonical_verdict(verif),
+        "reason": reason,
+        "corrected_observed_outcome": corrected_observed_outcome,
+        "corrected_entailment": corrected_entailment,
+        "corrected_coverage": corrected_coverage,
+        "corrected_evidence_ref": corrected_evidence_ref,
+        "evidence_ref": evidence_ref,
+        "corrected_by": corrected_by,
+        "supersedes_correction_id": supersedes_correction_id or None,
+        "corrected_at": _now_iso(),
+    }
+    append_correction(record)
+    return {
+        "status": "AMENDED",
+        "correction": record,
+        "verdict_unchanged": record["verdict_unchanged"],
         "query_time": _now_iso(),
     }
 
@@ -683,14 +981,14 @@ def _functions_from_jsonl_safe() -> dict[str, int]:
 def chron_index_resource() -> str:
     """
     Capability index — what CHRON can do. Read-once discovery surface.
-    Updated 2026-09-28: 19 tools, 8 resources, 4 prompts.
+    Updated 2026-11-01: 23 tools, 8 resources, 4 prompts.
     """
     return json.dumps(
         {
             "organ": "CHRON",
-            "version": "4.0.6",
+            "version": "4.2.0",
             "protocol_era": "2025-06-18",
-            "updated": "2026-09-28",
+            "updated": "2026-11-01",
             "doctrine": (
                 "Temporal consequence tracker. Predicts, verifies, calibrates, learns. "
                 "Not a scheduler. Not a memory store. "
@@ -701,6 +999,7 @@ def chron_index_resource() -> str:
                 "chron_active_predictions",
                 "chron_attention_debt",
                 "chron_calibration_state",
+                "chron_frame_witness",
                 "chron_create_event",
                 "chron_episodes",
                 "chron_generate_predictions",
@@ -713,8 +1012,11 @@ def chron_index_resource() -> str:
                 "chron_reconcile_state",
                 "chron_record_verification",
                 "chron_resolve_unverifiable",
+                "chron_resolve_event",
                 "chron_store_stats",
                 "chron_temporal_briefing",
+                "chron_time_now",
+                "chron_timing_audit",
                 "chron_verified_predictions",
             ],
             "resources": [
@@ -733,7 +1035,7 @@ def chron_index_resource() -> str:
                 "/calibrate",
                 "/audit",
             ],
-            "event_store_path": "/root/AAA/scripts/chron_events.json",
+            "event_store_path": "/root/chron/chron_events.json",
             "generation": STORE_GENERATION,
             "queried_at": _now_iso(),
         },
@@ -765,7 +1067,7 @@ def chron_events_upcoming_resource() -> str:
     """
     Upcoming chron_events with target_date — the institution's known future.
     """
-    chron_events = Path("/root/AAA/scripts/chron_events.json")
+    chron_events = Path("/root/chron/chron_events.json")
     if not chron_events.exists():
         return json.dumps({"events": [], "count": 0, "queried_at": _now_iso()})
     data = json.loads(chron_events.read_text())
@@ -938,6 +1240,128 @@ def chron_attention_debt() -> dict:
 
 
 @mcp.tool()
+def chron_timing_audit(audience: str = "all") -> dict:
+    """Audit event timing against the freshness contract.
+
+    Flags:
+      - STALE events past freshness_window_hours (delivery would be history)
+      - DUE_TODAY/FRESH events whose declared detection_cadence is coarser
+        than daily/event-driven
+      - RESOLVED events that no longer need polling
+
+    This is a read-only timing audit, not a scheduler. Use the warning to
+    fix the cron cadence or to close the event.
+    """
+    if not CHRON_EVENTS_STORE.exists():
+        return {
+            "error": f"{CHRON_EVENTS_STORE} not found",
+            "counts": {},
+            "events": [],
+            "query_time": _now_iso(),
+        }
+
+    data = json.loads(CHRON_EVENTS_STORE.read_text())
+    now = datetime.now(timezone.utc)
+    today = datetime.now(MYT).date()
+    rows = []
+
+    for e in data.get("events", []):
+        if audience != "all" and e.get("audience") not in (audience, "both"):
+            continue
+
+        target = e.get("target_date")
+        days_until = None
+        age_hours = None
+        timing_status = "NO_DATE"
+
+        if target:
+            try:
+                d = datetime.strptime(target, "%Y-%m-%d").date()
+            except ValueError:
+                timing_status = "INVALID_DATE"
+            else:
+                days_until = (d - today).days
+                end = datetime(d.year, d.month, d.day, tzinfo=MYT) + timedelta(days=1)
+                age_hours = max(0.0, (now - end).total_seconds() / 3600.0)
+                if e.get("resolution"):
+                    timing_status = "RESOLVED"
+                elif days_until > 1:
+                    timing_status = "UPCOMING"
+                elif days_until >= 0:
+                    timing_status = "DUE_TODAY"
+                else:
+                    try:
+                        fw = int(e.get("freshness_window_hours", 24) or 24)
+                    except (TypeError, ValueError):
+                        fw = 24
+                    timing_status = "FRESH" if age_hours <= fw else "STALE"
+
+        try:
+            freshness = int(e.get("freshness_window_hours", 24) or 24)
+        except (TypeError, ValueError):
+            freshness = 24
+        try:
+            max_delay = int(e.get("max_delivery_delay_hours", 24) or 24)
+        except (TypeError, ValueError):
+            max_delay = 24
+        cadence = str(e.get("detection_cadence") or "unspecified").strip().lower()
+
+        warning = None
+        recommended = None
+        if timing_status == "STALE":
+            warning = "event is past its freshness window; delivery would be history"
+            recommended = "stop polling; resolve or close the event"
+        elif timing_status in ("DUE_TODAY", "FRESH") and cadence not in (
+            "hourly",
+            "daily",
+            "event_driven",
+            "event-driven",
+        ):
+            warning = (
+                f"event window is active but detection cadence is {cadence!r}, "
+                "coarser than daily/event-driven"
+            )
+            recommended = "daily during the event window; event-driven on result day"
+
+        rows.append(
+            {
+                "event_id": e.get("id"),
+                "title": e.get("title"),
+                "target_date": target,
+                "audience": e.get("audience"),
+                "days_until": days_until,
+                "age_hours": round(age_hours, 2) if age_hours is not None else None,
+                "freshness_window_hours": freshness,
+                "max_delivery_delay_hours": max_delay,
+                "detection_cadence": cadence,
+                "timing_status": timing_status,
+                "resolution": bool(e.get("resolution")),
+                "warning": warning,
+                "recommended_cadence": recommended,
+            }
+        )
+
+    rows.sort(
+        key=lambda r: (
+            r["days_until"] is None,
+            r["days_until"] if r["days_until"] is not None else 99999,
+        )
+    )
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r["timing_status"]] = counts.get(r["timing_status"], 0) + 1
+
+    return {
+        "generated_at": _now_iso(),
+        "counts": counts,
+        "events": rows,
+        "stale_events": [r for r in rows if r["timing_status"] == "STALE"],
+        "warnings": [r for r in rows if r.get("warning")],
+        "query_time": _now_iso(),
+    }
+
+
+@mcp.tool()
 def chron_lessons(limit: int = 20, status: str = "all") -> dict:
     """Get extracted lessons — what the institution has learned from verified outcomes.
 
@@ -1078,10 +1502,102 @@ def chron_resolve_unverifiable(
 
 
 @mcp.tool()
+def chron_resolve_event(
+    event_id: str,
+    observed_outcome: str,
+    evidence_ref: str,
+) -> dict:
+    """Resolve a chron EVENT (not a prediction) with mandatory evidence.
+
+    Closes the event-closure gap (REALITY-CLOSURE-PROTOCOL v0.1, F13-ratified
+    2026-10-07): preregistration anchors and sovereign commitments mint no
+    predictions, so prediction-arrow discharge can never reach them. A resolved
+    event exits attention-debt minting but stays in the ledger (no delete).
+
+    Args:
+        event_id: Event id in chron_events.json.
+        observed_outcome: What actually happened (free text).
+        evidence_ref: File path, sha256, or receipt id — REQUIRED (F2).
+    """
+    if not (evidence_ref or "").strip():
+        return {
+            "_is_error": True,
+            "error_code": "EVIDENCE_REQUIRED",
+            "error": "chron_resolve_event requires evidence_ref (path, sha256, or receipt id)",
+            "query_time": _now_iso(),
+        }
+    events_path = CHRON_EVENTS_STORE
+    if not events_path.exists():
+        return {
+            "_is_error": True,
+            "error_code": "EVENTS_FILE_MISSING",
+            "error": f"{events_path} not found",
+            "query_time": _now_iso(),
+        }
+    data = json.loads(events_path.read_text())
+    events = data.get("events", [])
+    evt = next((e for e in events if e.get("id") == event_id), None)
+    if evt is None:
+        return {
+            "_is_error": True,
+            "error_code": "EVENT_NOT_FOUND",
+            "error": f"Event {event_id} not found",
+            "query_time": _now_iso(),
+        }
+    if evt.get("resolution"):
+        return {
+            "status": "ALREADY_RESOLVED",
+            "event_id": event_id,
+            "resolution": evt["resolution"],
+            "query_time": _now_iso(),
+        }
+    evt["resolution"] = {
+        "outcome": observed_outcome,
+        "evidence_ref": evidence_ref.strip(),
+        "resolved_at": _now_iso(),
+        "resolved_by": "chron_resolve_event",
+    }
+    tmp = events_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    tmp.replace(events_path)
+
+    # Close persisted OPEN debt items minted from this event. Append-only:
+    # rows flip OPEN -> RESOLVED with a resolution note; history is retained.
+    debt_closed, debt_error = [], None
+    try:
+        from chron.chron_attention_debt import _load_all_debt, _resolve_debt
+
+        for it in _load_all_debt():
+            if (
+                it.get("source") == "unresolved_event"
+                and it.get("ref_id") == event_id
+                and it.get("status") == "OPEN"
+            ):
+                if _resolve_debt(
+                    it.get("debt_id"),
+                    f"event resolved: {observed_outcome[:120]} | evidence: {evidence_ref[:120]}",
+                ):
+                    debt_closed.append(it.get("debt_id"))
+    except Exception as exc:  # event resolution already persisted — report, never hide
+        debt_error = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "status": "RESOLVED",
+        "event_id": event_id,
+        "resolution": evt["resolution"],
+        "debt_items_closed": debt_closed,
+        "debt_ledger_error": debt_error,
+        "note": "exits attention-debt minting; ledger retained (append-only discipline)",
+        "query_time": _now_iso(),
+    }
+
+
+@mcp.tool()
 def chron_create_event(
     event_id: str,
     title: str,
     target_date: str,
+    occurred_at: str = "",
     kind: str = "OBSERVATION",
     audience: str = "both",
     source: str = "agent",
@@ -1089,6 +1605,10 @@ def chron_create_event(
     confidence: str = "TENTATIVE",
     consequence: str = "MEDIUM",
     actionability: str = "WATCH",
+    amplitude: float | None = None,
+    freshness_window_hours: int = 24,
+    detection_cadence: str = "",
+    max_delivery_delay_hours: int = 24,
 ) -> dict:
     """Create a new event in chron_events.json — plant a temporal stake.
 
@@ -1100,6 +1620,9 @@ def chron_create_event(
         event_id: Unique kebab-case ID (e.g. 'my-004-inflation-oct')
         title: Human-readable event description
         target_date: ISO date YYYY-MM-DD
+        occurred_at: ISO-8601 timestamp when the event actually happened.
+            Required for the freshness axis: past-only events stay silent once
+            their age exceeds the freshness window. Omit for future events.
         kind: FISCAL, MARKET_EVENT, REGULATORY_WINDOW, PERSONAL_SAFE, MACRO_INDICATOR, MONETARY_POLICY, OBSERVATION
         audience: 'arif', 'syed', or 'both'
         source: Where this comes from (URL, institution, agent)
@@ -1107,8 +1630,23 @@ def chron_create_event(
         confidence: CONFIRMED / LIKELY / ANNOUNCED / PREDICTED / TENTATIVE
         consequence: HIGH / MEDIUM / LOW
         actionability: PREPARE / WATCH / MONITOR
+        amplitude: Optional numeric probability in [0.0, 1.0] for a forecast.
+            When supplied it becomes the generated prediction's
+            confidence_proposed verbatim, OVERRIDING the coarse `confidence`
+            enum. This is what lets a superposition of competing branches keep
+            its discrimination through recalibration and Brier scoring — without
+            it every forecast collapses onto the enum default and the calibrator
+            cannot tell a 0.25 claim from a 0.55 claim. Omit for non-forecast
+            events (birthdays, deadlines, fiscal windows).
+        freshness_window_hours: How long after target_date the result is still
+            "news" (default 24). Past this, delivery is history.
+        detection_cadence: Declared polling cadence — hourly, daily,
+            weekly, event_driven. Used by chron_timing_audit to flag a cadence
+            coarser than the freshness window.
+        max_delivery_delay_hours: Maximum allowed delay between event and
+            delivery (default 24). A job whose cadence exceeds this is flagged.
     """
-    chron_events_path = Path("/root/AAA/scripts/chron_events.json")
+    chron_events_path = Path("/root/chron/chron_events.json")
     if not chron_events_path.exists():
         return {"error": "chron_events.json not found", "query_time": _now_iso()}
 
@@ -1132,6 +1670,29 @@ def chron_create_event(
             "query_time": _now_iso(),
         }
 
+    if occurred_at:
+        try:
+            datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+        except ValueError:
+            return {
+                "error": "occurred_at must be ISO-8601 (e.g. 2026-10-18T22:00:00+08:00)",
+                "query_time": _now_iso(),
+            }
+
+    try:
+        freshness_window_hours = int(freshness_window_hours)
+        max_delivery_delay_hours = int(max_delivery_delay_hours)
+    except (TypeError, ValueError):
+        return {
+            "error": "freshness_window_hours and max_delivery_delay_hours must be integers",
+            "query_time": _now_iso(),
+        }
+    if freshness_window_hours < 0 or max_delivery_delay_hours < 0:
+        return {
+            "error": "freshness_window_hours and max_delivery_delay_hours must be >= 0",
+            "query_time": _now_iso(),
+        }
+
     new_event = {
         "id": event_id,
         "title": title,
@@ -1144,7 +1705,30 @@ def chron_create_event(
         "consequence": consequence,
         "actionability": actionability,
         "note": note,
+        "freshness_window_hours": freshness_window_hours,
+        "detection_cadence": detection_cadence,
+        "max_delivery_delay_hours": max_delivery_delay_hours,
     }
+    if occurred_at:
+        new_event["occurred_at"] = occurred_at
+
+    # Amplitude is optional and validated at the boundary: an out-of-range or
+    # non-numeric value is a caller bug, and silently clamping it would forge a
+    # probability the forecaster never asserted.
+    if amplitude is not None:
+        try:
+            amp = float(amplitude)
+        except (TypeError, ValueError):
+            return {
+                "error": f"amplitude must be numeric, got {amplitude!r}",
+                "query_time": _now_iso(),
+            }
+        if not 0.0 <= amp <= 1.0:
+            return {
+                "error": f"amplitude must be within [0.0, 1.0], got {amp}",
+                "query_time": _now_iso(),
+            }
+        new_event["amplitude"] = amp
 
     events.append(new_event)
     data["events"] = events
@@ -1156,6 +1740,7 @@ def chron_create_event(
         "event_id": event_id,
         "title": title,
         "target_date": target_date,
+        "amplitude": new_event.get("amplitude"),
         "total_events": len(events),
         "query_time": _now_iso(),
     }
@@ -1289,6 +1874,141 @@ def chron_proxy_reality_state(organ: str = "", window: int = 5) -> dict:
     }
 
 
+@mcp.tool()
+def chron_frame_witness(
+    action: str = "witness",
+    claims: list | None = None,
+    claim_id: str = "",
+) -> dict:
+    """Independent witness bridge — have FRAME (outside CHRON) mechanically check atomic claims.
+
+    Separation of powers (constitution): CHRON owns the temporal ledger; FRAME is the
+    independent witness and can say CHRON is wrong. FRAME observes, never executes,
+    and returns evidence only — VERIFIED / CONTRADICTED / UNVERIFIABLE / STALE / EACCES.
+    It NEVER returns SEAL/HOLD; adjudication stays with arifOS.
+
+    Use before recording a verification, when a claim's evidence should be checked by
+    a process that did not author it, or whenever CHRON state must be witnessed from
+    outside its own walls.
+
+    Args:
+        action: 'witness' — submit claims to FRAME's mechanical checker;
+                'results' — read recorded witness results (optionally filtered).
+        claims: list of {text, evidence:{check, path, field?, equals?, max_age_seconds?}}.
+                Evidence kinds: file_exists, file_fresh, json_field. Unpointed prose
+                is UNVERIFIABLE by design — fluency never certifies.
+        claim_id: optional filter for action='results'.
+
+    Returns:
+        For 'witness': FRAME's per-claim rows + rolled-up witness verdict
+        (CONFIRMED / CONTESTED / UNVERIFIABLE), evidence quality, contradictions,
+        confidence, and audit trail refs (frame_requests.jsonl / frame_results.jsonl).
+        For 'results': the recorded witness results.
+    """
+    if action == "results":
+        rows = fw_results(claim_id or None)
+        return {
+            "witness_results": rows,
+            "count": len(rows),
+            "query_time": _now_iso(),
+        }
+
+    if not isinstance(claims, list) or not claims:
+        return {
+            "error": "action='witness' requires claims: list[{text, evidence{check,...}}]",
+            "query_time": _now_iso(),
+        }
+
+    summary_text = "; ".join(str(c.get("text", ""))[:80] for c in claims[:5])
+    import uuid
+
+    claim_id = f"frame-{uuid.uuid4().hex[:12]}"
+    req = fw_request(
+        claim=summary_text or "unnamed claim set",
+        evidence=[json.dumps(c.get("evidence", {})) for c in claims[:20]],
+        source="chron_frame_witness",
+        claim_id=claim_id,
+    )
+
+    try:
+        payload = json.dumps({"claims": claims}).encode()
+        http_req = urllib.request.Request(
+            f"{FRAME_URL}/frame/witness/claims",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(http_req, timeout=15) as resp:
+            frame_out = json.loads(resp.read())
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return {
+            "error": f"FRAME unreachable at {FRAME_URL}: {exc}",
+            "claim_id": claim_id,
+            "request_logged": True,
+            "request": req,
+            "note": "witness request stays PENDING in frame_requests.jsonl",
+            "query_time": _now_iso(),
+        }
+
+    rows = frame_out.get("rows", [])
+    counts = frame_out.get("counts", {})
+    n_contradicted = counts.get("CONTRADICTED", 0)
+    n_verified = counts.get("VERIFIED", 0)
+    n_stale = counts.get("STALE", 0)
+    n_unverifiable = counts.get("UNVERIFIABLE", 0) + counts.get("EACCES", 0)
+
+    if n_contradicted:
+        verdict = "CONTESTED"
+    elif n_verified:
+        verdict = "CONFIRMED"
+    else:
+        verdict = "UNVERIFIABLE"
+
+    if n_unverifiable == 0 and n_contradicted == 0:
+        quality = "OBSERVED"
+    elif n_verified or n_stale:
+        quality = "INFERRED"
+    else:
+        quality = "SPECULATIVE"
+
+    contradictions = [
+        r.get("claim", "") for r in rows if r.get("status") == "CONTRADICTED"
+    ]
+    decided = n_verified + n_stale + n_contradicted + n_unverifiable
+    confidence = round(n_verified / decided, 3) if decided else 0.0
+
+    rec = fw_record(
+        claim=summary_text or "unnamed claim set",
+        verdict=verdict,
+        evidence_quality=quality,
+        contradictions=contradictions,
+        confidence=confidence,
+        claim_id=claim_id,
+        rows=rows,
+    )
+
+    return {
+        "claim_id": claim_id,
+        "witness_verdict": verdict,
+        "evidence_quality": quality,
+        "contradictions": contradictions,
+        "confidence": confidence,
+        "frame_counts": counts,
+        "rows": rows,
+        "discipline_note": frame_out.get(
+            "discipline_note",
+            "action-trace evidence outranks prose; FRAME never executes commands",
+        ),
+        "audit": {
+            "request_file": "frame_requests.jsonl",
+            "result_file": "frame_results.jsonl",
+            "result_id": rec.get("result_id"),
+            "frame_url": f"{FRAME_URL}/frame/witness/claims",
+        },
+        "query_time": _now_iso(),
+    }
+
+
 # ───────────────────────── HELPERS ─────────────────────────
 
 
@@ -1330,7 +2050,7 @@ def _get_last_loop() -> dict | None:
 
 def _get_active_events_summary() -> list[dict]:
     """Get condensed active events for briefing."""
-    chron_events = Path("/root/AAA/scripts/chron_events.json")
+    chron_events = Path("/root/chron/chron_events.json")
     if not chron_events.exists():
         return []
     data = json.loads(chron_events.read_text())
@@ -1361,27 +2081,40 @@ def _get_active_events_summary() -> list[dict]:
 # ───────────────────────── HEALTH ─────────────────────────
 
 
+# ── /health aggregate cache (2026-10-15) ──────────────────────────────────
+# /health recomputed aggregates over ~194k episodes on every call (~800ms,
+# 900× slower than every other organ). Bounded fix: 60s TTL cache with honest
+# sensor labeling — payload carries served/computed_at/age_s so a cached read
+# can never be mistaken for a live one. Writers untouched (zero mutation risk).
+_HEALTH_CACHE: dict = {"ts": 0.0, "payload": None}
+
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request):
     """Health endpoint for federation probing."""
+    import time as _time
+
     from starlette.responses import JSONResponse
 
-    store = get_store()
-    preds = load_predictions()
-    calibration = compute_calibration()
-    active = get_active()
-    ledger = get_verified(limit=10000)
-    decisive = [v for v in ledger if _canonical_verdict(v) in _DECISIVE]
-    # Counted from the ledger, not from calibration: an explicitly closed-untestable
-    # arrow is finished-but-unscored and must never be conflated with a verifier's
-    # "evidence is late". Reading calibration here reported 0 for closures that existed.
-    awaiting = [v for v in ledger if _canonical_verdict(v) == VERDICT_UNVERIFIABLE]
-    closed_untestable = [v for v in ledger if _canonical_verdict(v) == VERDICT_CLOSED_UNTESTABLE]
+    _now = _time.time()
+    if _HEALTH_CACHE["payload"] is None or _now - _HEALTH_CACHE["ts"] > 60.0:
+        store = get_store()
+        preds = load_predictions()
+        calibration = compute_calibration()
+        active = get_active()
+        ledger = get_verified(limit=10000)
+        decisive = [v for v in ledger if _canonical_verdict(v) in _DECISIVE]
+        # Counted from the ledger, not from calibration: an explicitly closed-untestable
+        # arrow is finished-but-unscored and must never be conflated with a verifier's
+        # "evidence is late". Reading calibration here reported 0 for closures that existed.
+        awaiting = [v for v in ledger if _canonical_verdict(v) == VERDICT_UNVERIFIABLE]
+        closed_untestable = [
+            v for v in ledger if _canonical_verdict(v) == VERDICT_CLOSED_UNTESTABLE
+        ]
 
-    ad_summary = get_ad_summary()
+        ad_summary = get_ad_summary()
 
-    return JSONResponse(
-        {
+        payload = {
             "status": "ok",
             "organ": "CHRON",
             "port": int(os.environ.get("CHRON_MCP_PORT", 18102)),
@@ -1399,6 +2132,10 @@ async def health(request):
                 "total_verified": calibration.get("total", 0),
                 "accuracy": calibration.get("accuracy"),
                 "mean_brier": calibration.get("mean_brier"),
+                # D4-PATCH-2026-10-07: surface Wilson CI + quality at /health.
+                "quality": calibration.get("quality"),
+                "accuracy_ci95": calibration.get("accuracy_ci95"),
+                "warnings": calibration.get("warnings", []),
             },
             "attention_debt": {
                 "total_ad": ad_summary.get("total_ad", 0),
@@ -1407,7 +2144,18 @@ async def health(request):
             },
             "query_time": _now_iso(),
         }
-    )
+        _HEALTH_CACHE["payload"] = payload
+        _HEALTH_CACHE["ts"] = _now
+        payload["cache"] = {"served": "live", "computed_at": payload["query_time"]}
+    else:
+        payload = dict(_HEALTH_CACHE["payload"])
+        payload["cache"] = {
+            "served": "cached",
+            "computed_at": _HEALTH_CACHE["payload"]["query_time"],
+            "age_s": round(_now - _HEALTH_CACHE["ts"], 1),
+        }
+
+    return JSONResponse(payload)
 
 
 # ───────────────────────── PROMPTS (Phase 4) ─────────────────────────
@@ -1504,6 +2252,129 @@ def audit_prompt(scope: str = "store") -> str:
         "(5) proxy_reality pairs have observation coverage > 0. "
         "Report any drift, invariant violation, or empty proxy-reality pairs as HOLD."
     )
+
+
+# ───────────────────── TEMPORAL REALITY (P1, 2026-10-31) ─────────────────────
+# HERMES CONVERGENCE directive: ONE canonical live-time capability, owned by the
+# existing temporal substrate. No new organ, no second ledger.
+#
+# Why this exists: agent/system_prompt.py:500 stamps "Conversation started"
+# once per session and freezes it ("byte-stable across rebuilds"). Measured
+# 2026-10-31: the prompt said Friday 30 Oct while reality was Saturday 31 Oct,
+# 16h47m stale. A remembered clock is not an observed clock.
+#
+# Doctrine: model_generated is always false. The model may not author
+# observed_at. If synchronisation metadata cannot be obtained, say UNKNOWN
+# rather than inventing precision.
+
+_TZ_FILE = "/etc/timezone"
+
+
+def _read_timezone() -> str:
+    try:
+        tz = Path(_TZ_FILE).read_text(encoding="utf-8").strip()
+        if tz:
+            return tz
+    except OSError:
+        pass
+    env_tz = os.environ.get("TZ")
+    return env_tz if env_tz else "UNKNOWN"
+
+
+def _read_clock_metadata() -> dict:
+    """Stratum / offset / RMS from chrony when present. Never fabricate."""
+    meta = {
+        "clock_source": "UNKNOWN",
+        "sync_status": "UNKNOWN",
+        "stratum": None,
+        "uncertainty_ms": None,
+    }
+    try:
+        out = subprocess.run(
+            ["chronyc", "tracking"], capture_output=True, text=True, timeout=5
+        )
+        if out.returncode == 0 and out.stdout:
+            meta["clock_source"] = "chrony"
+            for line in out.stdout.splitlines():
+                if ":" not in line:
+                    continue
+                k, _, v = line.partition(":")
+                k, v = k.strip().lower(), v.strip()
+                if k == "stratum":
+                    try:
+                        meta["stratum"] = int(v)
+                    except ValueError:
+                        pass
+                elif k == "rms offset":
+                    # "0.000265998 seconds" -> milliseconds
+                    try:
+                        meta["uncertainty_ms"] = round(float(v.split()[0]) * 1000.0, 6)
+                    except (ValueError, IndexError):
+                        pass
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    try:
+        td = subprocess.run(
+            ["timedatectl", "show"], capture_output=True, text=True, timeout=5
+        )
+        if td.returncode == 0:
+            for line in td.stdout.splitlines():
+                if line.startswith("NTPSynchronized="):
+                    meta["sync_status"] = (
+                        "SYNCHRONIZED"
+                        if line.split("=", 1)[1].strip() == "yes"
+                        else "UNSYNCHRONIZED"
+                    )
+                    if meta["clock_source"] == "UNKNOWN":
+                        meta["clock_source"] = "systemd-timesyncd"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return meta
+
+
+@mcp.tool()
+def chron_time_now() -> dict:
+    """Observe the live clock. Call this before ANY temporal claim.
+
+    Reads the clock on every invocation — never cached, never derived from the
+    session prompt. Use monotonic_ns for elapsed duration and timeouts; use the
+    wall-clock fields for human and UTC timestamps.
+
+    A frozen session anchor is a remembered clock. This tool is the observed one.
+    """
+    from zoneinfo import ZoneInfo
+
+    now_utc = datetime.now(timezone.utc)
+    tz_name = _read_timezone()
+    try:
+        local = now_utc.astimezone(ZoneInfo(tz_name))
+        tz_repr = tz_name
+    except Exception:
+        local = now_utc.astimezone()
+        tz_repr = "UNKNOWN"
+
+    offset = local.strftime("%z")
+    offset_fmt = f"{offset[:3]}:{offset[3:]}" if len(offset) == 5 else offset
+    meta = _read_clock_metadata()
+
+    return {
+        "observed_at_utc": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "observed_at_local": local.isoformat(timespec="seconds"),
+        "timezone": tz_repr,
+        "utc_offset": offset_fmt,
+        "clock_source": meta["clock_source"],
+        "sync_status": meta["sync_status"],
+        "stratum": meta["stratum"],
+        "uncertainty_ms": meta["uncertainty_ms"],
+        "monotonic_ns": time.monotonic_ns(),
+        "ttl_seconds": 0,
+        "model_generated": False,
+        "session_anchor_semantics": (
+            "The system prompt line 'Conversation started' is SESSION_STARTED_AT, "
+            "not current time. It is intentionally frozen for prompt-cache stability."
+        ),
+    }
 
 
 # ───────────────────────── MAIN ─────────────────────────

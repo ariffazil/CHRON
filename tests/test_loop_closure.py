@@ -14,7 +14,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, "/root")
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(_ROOT.parent))
 
 from chron import chron_learn as cl  # noqa: E402
 from chron import chron_loop_close as lc  # noqa: E402

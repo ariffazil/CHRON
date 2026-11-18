@@ -33,8 +33,13 @@ def request_witness(
     claim: str,
     evidence: list[str],
     source: str = "chron",
+    claim_id: str | None = None,
 ) -> dict:
-    """Request FRAME to witness a CHRON claim.
+    """Log a witness request for FRAME.
+
+    This function ONLY writes the request row. The HTTP call to FRAME lives in
+    server.chron_frame_witness; keeping the I/O boundary explicit prevents a
+    caller from believing a request was sent when it was only recorded.
 
     FRAME returns:
       - witness_verdict: CONFIRMED | CONTESTED | UNVERIFIABLE
@@ -45,8 +50,12 @@ def request_witness(
     FRAME does NOT return SEAL/HOLD — that's arifOS's job.
     FRAME only witnesses reality.
     """
+    claim_id = (
+        claim_id or f"frame-req-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
+    )
     # Store the witness request
     request = {
+        "claim_id": claim_id,
         "timestamp": _now_iso(),
         "claim": claim,
         "evidence": evidence,
@@ -95,16 +104,26 @@ def record_witness_result(
     evidence_quality: str,
     contradictions: list[str],
     confidence: float,
+    claim_id: str | None = None,
+    rows: list[dict] | None = None,
 ) -> dict:
-    """Record a FRAME witness result (called by FRAME, not by CHRON)."""
+    """Record a FRAME witness result (called by CHRON after FRAME responds).
+
+    `rows` preserves FRAME's per-claim dispositions. The roll-up alone is not
+    enough: a CONFIRMED set can contain one CONTRADICTED row, and a reader must
+    be able to see which claim carried the contradiction.
+    """
     result = {
         "result_id": f"frame-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+        "claim_id": claim_id,
+        "status": "COMPLETED",
         "timestamp": _now_iso(),
         "claim": claim,
         "verdict": verdict,
         "evidence_quality": evidence_quality,
         "contradictions": contradictions,
         "confidence": confidence,
+        "rows": rows or [],
         "source": "frame",
     }
 

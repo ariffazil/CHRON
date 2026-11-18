@@ -8,8 +8,7 @@ doctrine: "Demi masa. Time is the witness. CHRON predicts, verifies, calibrates,
 authority_ceiling: 555_COMPUTE_ONLY
 port: 18102
 unit: chron-mcp.service
-source_commit_main: 610b58d (19 @mcp.tool handlers on main)
-live_runtime_surface: http://127.0.0.1:18102/mcp (24 MCP tools, 8 resources, 4 prompts on active host service)
+tools_live: 24 (reconciled on main + host :18102; 8 resources, 4 prompts)
 public_health: https://chron.arif-fazil.com/health
 public_mcp: https://chron.arif-fazil.com/mcp
 public_llms: https://chron.arif-fazil.com/llms.txt
@@ -94,8 +93,7 @@ truth:
 status:
   proven: prediction_verification_brier_scoring_and_attention_debt
   partial: lesson_to_policy_causal_uptake
-  drift: origin_main_19_tools_vs_live_host_24_tools
-  target: reconciled_main_ci_packaging_and_frame_cross_witness
+  target: independent_external_calibration_audit
 ```
 
 ---
@@ -174,16 +172,14 @@ curl -s http://127.0.0.1:18102/health | jq '{status, episodes, predictions, cali
 
 ## MCP surface
 
-CHRON serves Streamable HTTP MCP via [`mcp_server.py`](./mcp_server.py) and [`server.py`](./server.py) on `:18102`.
+CHRON serves Streamable HTTP MCP via [`mcp_server.py`](./mcp_server.py) and [`server.py`](./server.py) on `:18102`, exposing **24** annotated tools (1:1 parity in [`mcp_annotations.py`](./mcp_annotations.py)), **8** resources, and **4** prompts.
 
-> **Repo-vs-runtime note (`2026-11-18`):** `origin/main` (`610b58d`) declares **19** `@mcp.tool` handlers, while the live production service (`chron-mcp.service`) runs the active feature branch and exposes **24** tools (`+5` marked below), **8** resources, and **4** prompts. Reconciling `main` with the live runtime is tracked in [Known gaps](#evidence--known-gaps).
-
-| Category | Tools (`origin/main` 19 + live 5 = 24) | Primary module |
+| Category | Tools (`24` total) | Primary module |
 |---|---|---|
-| **Prediction & Verification** | `chron_predictions_due`, `chron_active_predictions`, `chron_verified_predictions`, `chron_generate_predictions`, `chron_record_verification`, `chron_resolve_unverifiable`, `chron_amend_verification` *(live)* | [`chron_prediction.py`](./chron_prediction.py) · [`chron_verify.py`](./chron_verify.py) |
+| **Prediction & Verification** | `chron_predictions_due`, `chron_active_predictions`, `chron_verified_predictions`, `chron_generate_predictions`, `chron_record_verification`, `chron_resolve_unverifiable`, `chron_amend_verification` | [`chron_prediction.py`](./chron_prediction.py) · [`chron_verify.py`](./chron_verify.py) |
 | **Calibration & Learning** | `chron_calibration_state`, `chron_lessons`, `chron_episodes` | [`chron_learn.py`](./chron_learn.py) · [`chron_episode.py`](./chron_episode.py) |
-| **Events, Debt & Timing** | `chron_create_event`, `chron_active_events`, `chron_temporal_briefing`, `chron_attention_debt`, `chron_reconcile_state`, `chron_timing_audit` *(live)*, `chron_resolve_event` *(live)* | [`chron_attention_debt.py`](./chron_attention_debt.py) · [`chron_briefing.py`](./chron_briefing.py) |
-| **Proxy-Reality & Witness** | `chron_proxy_reality_register`, `chron_proxy_reality_observe`, `chron_proxy_reality_state`, `chron_frame_witness` *(live)*, `chron_time_now` *(live)* | [`chron_proxy_reality.py`](./chron_proxy_reality.py) · [`chron_frame.py`](./chron_frame.py) |
+| **Events, Debt & Timing** | `chron_create_event`, `chron_active_events`, `chron_temporal_briefing`, `chron_attention_debt`, `chron_reconcile_state`, `chron_timing_audit`, `chron_resolve_event` | [`chron_attention_debt.py`](./chron_attention_debt.py) · [`chron_briefing.py`](./chron_briefing.py) |
+| **Proxy-Reality, Witness & Clock** | `chron_proxy_reality_register`, `chron_proxy_reality_observe`, `chron_proxy_reality_state`, `chron_frame_witness`, `chron_time_now` | [`chron_proxy_reality.py`](./chron_proxy_reality.py) · [`chron_frame.py`](./chron_frame.py) |
 | **Store & Loop Diagnostics** | `chron_store_stats`, `chron_last_loop` | [`chron_store.py`](./chron_store.py) · [`chron_loop_close.py`](./chron_loop_close.py) |
 
 **Resources (8):** `chron://state`, `chron://index`, `chron://predictions/active`, `chron://events/upcoming`, `chron://calibration`, `chron://lessons`, `chron://schema`, `chron://doctrine`.  
@@ -198,7 +194,7 @@ CHRON serves Streamable HTTP MCP via [`mcp_server.py`](./mcp_server.py) and [`se
 | Metric | Live Measured Value |
 |---|---|
 | Service / Port | `ok` · `chron-mcp.service` on `:18102` (`https://chron.arif-fazil.com/health` HTTP `200`) |
-| MCP Surface | **24** live tools · 8 resources · 4 prompts *(19 tools on `origin/main` `610b58d`)* |
+| MCP Surface | **24** tools · 8 resources · 4 prompts (annotated 24/24 in `mcp_annotations.py`) |
 | Episodes | `199,709` |
 | Predictions | `230` total · `85` active · `85` verified · `2` unverifiable awaiting evidence · `11` closed untestable · `0` orphan verification records |
 | Calibration | `78` verified · accuracy `0.6100` (Wilson 95% CI `[0.4662, 0.6804]`) · mean Brier `0.2214` · quality `SUFFICIENT` |
@@ -226,13 +222,12 @@ If this snapshot conflicts with `:18102/health` or `tools/list`, the live endpoi
 
 ## Evidence & known gaps
 
-| Item | Current State | Required Action |
+| Item | Current State | Status |
 |---|---|---|
-| `main` vs live host branch split | `origin/main` (`610b58d`) carries `19` tools and has no merge base with live `feat/observer-attribution-derived` (`24` tools + local working edits) | Reconcile live verified Python modules onto `main` while keeping `chron_events.json` & runtime `data/` untracked |
-| `pytest` collection on `origin/main` | [`tests/test_bl02_failclosed.py`](./tests/test_bl02_failclosed.py) calls bare top-level `sys.exit()` on `main`, halting pytest collection (`76 passed` on live host branch where `__main__` guard exists) | Port the `if __name__ == "__main__":` + pytest wrapper fix from live host to `main` |
-| Repo hygiene & packaging | `origin/main` lacks `pyproject.toml`, `.github/workflows/` CI, `SECURITY.md`, and `FEDERATION_CONTRACT.md`, while tracking root clutter (`.unit-backup-*.service`, historical logs) | Add `pyproject.toml` + `pytest` CI workflow + security/contract files and prune backup files cleanly |
-| Open PR backlog | PR `#1` (`CONFLICTING`) carries historical stores; PR `#2` (`human-rasa-p1-lesson-uptake`, `MERGEABLE`) adds `lesson_uptake.py` | Triage PR `#2` onto reconciled `main` and retire conflicted PR `#1` cleanly |
-| External verification | Calibration metrics and `chron_frame_witness` path are self-reported only | Establish independent witness test coverage and end-to-end FRAME proof |
+| Code & test reconciliation | `24`-tool runtime modules, `lesson_uptake.py`, `chron_causal_contract.py`, `pyproject.toml`, `SECURITY.md`, `FEDERATION_CONTRACT.md`, and CI reconciled on `main` | **Closed** |
+| Hermetic pytest + CI gate | `tests/test_bl02_failclosed.py` collection crash fixed; `tests/test_frame_witness_integration.py` covers `24` tools + mock/live FRAME witness | **Closed in CI** (host-fixture tests stay guarded to host stores) |
+| Causal lesson attribution | `chron_causal_contract.py` discloses `MECHANISM_ABSENT` vs `MECHANISM_PRESENT`; policy-promotion gating awaits explicit owner verdict | **Open (by design)** |
+| External audit | Calibration metrics are runtime self-report; no external auditor has independently certified the pipeline | **Open** |
 
 ---
 
@@ -241,9 +236,15 @@ If this snapshot conflicts with `:18102/health` or `tools/list`, the live endpoi
 ```bash
 git clone https://github.com/ariffazil/CHRON.git
 cd CHRON
+uv sync --frozen --extra dev
+uv run pytest -q
+# Live cross-organ probe on the production host:
+CHRON_RUN_LIVE_TESTS=1 uv run pytest tests/test_frame_witness_integration.py -q
 # On the production host (chron-mcp.service runs from /root/chron with PYTHONPATH=/root):
 PYTHONPATH=/root CHRON_MCP_PORT=18102 python3 mcp_server.py
 ```
+
+See [`SECURITY.md`](./SECURITY.md), [`FEDERATION_CONTRACT.md`](./FEDERATION_CONTRACT.md), [`AGENTS.md`](./AGENTS.md), and [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
 
 Check live service & scheduled sweeps:
 
@@ -267,7 +268,7 @@ systemctl list-timers 'chron-*'
 | Unit | `chron-mcp.service` |
 | Authority ceiling | `555_COMPUTE_ONLY` |
 | Live (SOT probe @2026-11-18) | `UP` (`24` tools · `199,709` episodes · `230` predictions) |
-| `origin/main` | `610b58d` (`19` tools; live branch reconciliation pending) |
+| Branch alignment | `main` reconciled (`24` tools, `uv lock` + pytest CI) |
 | Public Endpoint / MCP | `https://chron.arif-fazil.com/health` · `https://chron.arif-fazil.com/mcp` · `https://chron.arif-fazil.com/llms.txt` |
 | Flow graph | [FEDERATION.md](https://github.com/ariffazil/AAA/blob/main/FEDERATION.md) — peta semua organ + repo |
 <!-- FEDERATION-STANDARD v2026-11-18 END -->

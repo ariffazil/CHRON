@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -54,13 +55,20 @@ SCHEMA = "chron_calibration_v2"
 #: Every store a prediction may live in. Order is significant: it is the
 #: deterministic tie-break when two rows share a `created_at`.
 LEDGER_STORES: list[tuple[str, Path, str]] = [
-    ("hermes-json", Path("/root/.hermes/cron/state/chron_personal/predictions.json"), "json"),
+    (
+        "hermes-json",
+        Path("/root/.hermes/cron/state/chron_personal/predictions.json"),
+        "json",
+    ),
     ("chron-jsonl", Path("/root/chron/data/predictions.jsonl"), "jsonl"),
 ]
 
 #: Verification logs, paired with the store they describe.
 LEDGER_VERIFICATION_LOGS: list[tuple[str, Path]] = [
-    ("hermes-json", Path("/root/.hermes/cron/state/chron_personal/verification_log.jsonl")),
+    (
+        "hermes-json",
+        Path("/root/.hermes/cron/state/chron_personal/verification_log.jsonl"),
+    ),
     ("chron-jsonl", Path("/root/chron/data/verification_log.jsonl")),
 ]
 
@@ -290,6 +298,9 @@ def build_settled_ledger() -> dict[str, Any]:
                 "created_at": row.get("created_at") or "",
                 "verify_at": row.get("verify_at"),
                 "verdict": verdict,
+                # P2 by_error_type 2026-11-01: carry the STORED error class from
+                # the verification record (None when the cause was never named).
+                "error_type": str(rec.get("error_type") or "").strip().upper() or None,
                 "brier_score": _brier(row, rec, verdict),
                 "source": row.get("source"),
                 "source_id": row.get("source_id"),
@@ -334,9 +345,12 @@ def build_settled_ledger() -> dict[str, Any]:
                     "store": m["store"],
                     "prediction_id": m["prediction_id"],
                     "verdict": m["verdict"],
+                    "error_type": m.get("error_type"),
                     "brier_score": m["brier_score"],
                     "is_primary": m is members[0],
-                    "duplicate_of": None if m is members[0] else members[0]["prediction_id"],
+                    "duplicate_of": None
+                    if m is members[0]
+                    else members[0]["prediction_id"],
                 }
                 for m in members
             ],
@@ -415,8 +429,12 @@ def duplicate_guard() -> dict:
 def _tally(observations: list[dict]) -> dict:
     if not observations:
         return {
-            "n": 0, "correct": 0, "incorrect": 0, "mixed": 0,
-            "accuracy": None, "mean_brier": None,
+            "n": 0,
+            "correct": 0,
+            "incorrect": 0,
+            "mixed": 0,
+            "accuracy": None,
+            "mean_brier": None,
         }
     correct = sum(1 for o in observations if o["class"] == "CORRECT")
     incorrect = sum(1 for o in observations if o["class"] == "INCORRECT")
@@ -433,6 +451,56 @@ def _tally(observations: list[dict]) -> dict:
     }
 
 
+# D4-PATCH-2026-10-07: Wilson 95% CI + small-sample quality surface.
+# Pure functions. No behavior change at n>=MIN_EFFECTIVE_N.
+# Backed up at /root/.hermes/cache/scratch/patches-2026-10-07/bak/chron_ledger_integrity.py.bak-2026-10-07T1630Z
+# Doc: arifOS audit 2026-10-07 (D4 distill). F13 SAH chain.
+
+
+def wilson_ci95(k: int, n: int) -> tuple[float, float]:
+    """Wilson score 95% CI on a binomial hit-rate. Returns (lo, hi) in [0, 1].
+    Stable for n>=1; returns (0.0, 1.0) when n=0 (no evidence, no claim).
+    Newcombe 1998, z=1.96, no continuity correction.
+    """
+    if n <= 0:
+        return (0.0, 1.0)
+    z = 1.959963984540291
+    p = k / n
+    denom = 1.0 + z * z / n
+    centre = (p + z * z / (2.0 * n)) / denom
+    half = (z * math.sqrt(p * (1.0 - p) / n + z * z / (4.0 * n * n))) / denom
+    return (max(0.0, centre - half), min(1.0, centre + half))
+
+
+# Mirror of MIN_EFFECTIVE_N in chron_prediction — duplicated here to avoid
+# import cycle (chron_prediction imports compute_calibration from this module).
+MIN_EFFECTIVE_N = 8
+QUALITY_INSUFFICIENT = "INSUFFICIENT"
+QUALITY_SUFFICIENT = "SUFFICIENT"
+
+
+def quality_and_warnings(effective: dict, _decisives: int) -> tuple[str, list[str]]:
+    """Pure. Returns (quality, warnings_list) for the published payload.
+    Quality floor: n < MIN_EFFECTIVE_N -> INSUFFICIENT (point estimate not yet
+    a skill estimate). Warnings are non-fatal advisories; the truth surface
+    remains observable even when small.
+    """
+    n = int(effective.get("n") or 0)
+    k = int(effective.get("correct") or 0)
+    warnings: list[str] = []
+    if n == 0:
+        warnings.append("ZERO_SAMPLE: accuracy/mean_brier are not defined.")
+        return QUALITY_INSUFFICIENT, warnings
+    if n < MIN_EFFECTIVE_N:
+        warnings.append(
+            f"SMALL_SAMPLE: effective_n={n} < MIN_EFFECTIVE_N={MIN_EFFECTIVE_N}; "
+            f"point estimate may be 1-2 observations from the true rate. "
+            f"Wilson 95% CI accompanies the accuracy figure."
+        )
+        return QUALITY_INSUFFICIENT, warnings
+    return QUALITY_SUFFICIENT, warnings
+
+
 def compute_calibration_unified() -> dict:
     """The ONE calibration computation. Every surface must read this."""
     ledger = build_settled_ledger()
@@ -446,8 +514,71 @@ def compute_calibration_unified() -> dict:
     raw_correct = sum(1 for r in raw_rows if r["verdict"] == VERDICT_CORRECT)
     raw_briers = [r["brier_score"] for r in raw_rows if r["brier_score"] is not None]
 
+    # ── R-FILTER CALIBRATION SPLIT (2026-10-03) ─────────────────────────
+    # Rationality Filter doctrine: split miss rate by rationality_filter_class.
+    # Predictions whose class is 'none' / [] represent corpus-present data; the
+    # miss rate on these IS the model's real skill. Predictions whose class is
+    # non-empty depend on data the corpus systematically underrepresents; the
+    # miss rate on these is the EXPECTED boundary cost from the R-FILTER
+    # theorem, not a model defect. Reporting them as one number collapses the
+    # apparatus bias into a single 'model skill' score — exactly the laundered
+    # record the doctrine exists to expose.
+    #
+    # Companion: rationality-filter-quantum-map.md §13 (R-FILTER theorem) +
+    # rationality-filter-doctrine.md §A.4 (calibration split).
+    corpus_rows = [
+        r
+        for r in raw_rows
+        if not r.get("rationality_filter_class")
+        or r.get("rationality_filter_class") == []
+    ]
+    rfilter_rows = [
+        r
+        for r in raw_rows
+        if r.get("rationality_filter_class") and r.get("rationality_filter_class") != []
+    ]
+
+    corpus_present = {
+        "n": len(corpus_rows),
+        "correct": sum(1 for r in corpus_rows if r["verdict"] == VERDICT_CORRECT),
+    }
+    if corpus_present["n"]:
+        corpus_present["miss_rate"] = round(
+            1.0 - corpus_present["correct"] / corpus_present["n"], 4
+        )
+    else:
+        corpus_present["miss_rate"] = None
+    rationality_filter_error = {
+        "n": len(rfilter_rows),
+        "correct": sum(1 for r in rfilter_rows if r["verdict"] == VERDICT_CORRECT),
+    }
+    if rationality_filter_error["n"]:
+        rationality_filter_error["miss_rate"] = round(
+            1.0 - rationality_filter_error["correct"] / rationality_filter_error["n"], 4
+        )
+    else:
+        rationality_filter_error["miss_rate"] = None
+
     guard = duplicate_guard()
-    by_error_type = {"NONE": effective["correct"], "UNKNOWN": effective["incorrect"]}
+    # ── P2 by_error_type 2026-11-01 (tasks.json p2-chron-by-error-type-projection) ──
+    # Was a hardcoded verdict projection {NONE: correct, UNKNOWN: incorrect} —
+    # the field name promised classes, the value counted verdicts, so every
+    # INCORRECT was published as UNKNOWN regardless of its stored error_type.
+    # Now: count EFFECTIVE observations by the STORED error class of their
+    # primary member. Population matches accuracy/total (effective n), so
+    # sum(by_error_type) == correct + incorrect; MIXED stays uncounted (legacy
+    # parity). Correct = NONE. An INCORRECT whose class was never named lands
+    # UNKNOWN — that is the honest blindness count, not a default.
+    by_error_type: dict[str, int] = {}
+    for o in observations:
+        if o["class"] == "CORRECT":
+            et = "NONE"
+        elif o["class"] == "INCORRECT":
+            primary = o["members"][0] if o.get("members") else {}
+            et = str(primary.get("error_type") or "").strip().upper() or "UNKNOWN"
+        else:
+            continue  # MIXED: neither correct nor incorrect; never had a bucket
+        by_error_type[et] = by_error_type.get(et, 0) + 1
 
     confidences: list[float] = []
     for r in ledger["settled_rows"]:
@@ -464,6 +595,14 @@ def compute_calibration_unified() -> dict:
         if effective["mean_brier"] is not None
         else None
     )
+
+    # ── D4-PATCH-2026-10-07: Wilson 95% CI + small-sample quality surface ──
+    # Pure derivation. No I/O. Backups at /root/.hermes/cache/scratch/patches-2026-10-07/bak/.
+    ci_lo, ci_hi = wilson_ci95(
+        int(effective.get("correct") or 0),
+        int(effective.get("n") or 0),
+    )
+    quality, ss_warnings = quality_and_warnings(effective, effective["n"])
 
     decisive_by_store: dict[str, int] = {}
     for o in observations:
@@ -488,6 +627,14 @@ def compute_calibration_unified() -> dict:
         "mixed": effective["mixed"],
         "accuracy": effective["accuracy"],
         "mean_brier": effective["mean_brier"],
+        # ── D4-PATCH-2026-10-07: Wilson CI + small-sample quality surface ──
+        "accuracy_ci95": {
+            "lower": round(ci_lo, 4),
+            "upper": round(ci_hi, 4),
+            "method": "wilson_score_95",
+        },
+        "quality": quality,
+        "warnings": ss_warnings,
         "by_error_type": by_error_type,
         "mean_confidence": mean_confidence,
         "bias": bias,
@@ -516,12 +663,27 @@ def compute_calibration_unified() -> dict:
             "raw_n": len(raw_rows),
             "effective_n": effective["n"],
             "samples_removed": len(raw_rows) - effective["n"],
-            "raw_mean_brier": (sum(raw_briers) / len(raw_briers)) if raw_briers else None,
+            "raw_mean_brier": (sum(raw_briers) / len(raw_briers))
+            if raw_briers
+            else None,
             "effective_mean_brier": effective["mean_brier"],
         },
         # ── Integrity surface ──
         "stores": ledger["store_counts"],
         "predictions_total": sum(ledger["store_counts"].values()),
+        # ── R-FILTER CALIBRATION SPLIT (2026-10-03) ─────────────────────────
+        # Two mandatory columns. Any human-facing "the model is X% right" must
+        # split these two. If a prediction in any rationality_filter_class
+        # shows miss_rate above 0.35 (calibrated after first 90 days), file a
+        # SCAR of the audit class.
+        "corpus_present_error": corpus_present,
+        "rationality_filter_error": rationality_filter_error,
+        "rfilter_split_self_applied": (
+            "Reporting these as one number would be the laundered record the "
+            "R-FILTER doctrine exists to expose. Two columns are mandatory. "
+            "Empty rationality_filter_error.n is the normal pre-audit condition, "
+            "not a defect."
+        ),
         "ids": {
             "prediction_ids_present": ledger["prediction_ids_present"],
             "prediction_ids_missing": ledger["prediction_ids_missing"],
@@ -533,7 +695,10 @@ def compute_calibration_unified() -> dict:
         "decisive_by_store": decisive_by_store,
         "synthetic_self_tests": sum(1 for o in observations if o["synthetic"]),
         "synthetic_self_test_ids": sorted(
-            m["prediction_id"] for o in observations if o["synthetic"] for m in o["members"]
+            m["prediction_id"]
+            for o in observations
+            if o["synthetic"]
+            for m in o["members"]
         ),
         "orphan_verifications": ledger["orphan_records"],
         "honest_scopes": honest_scope_figures(ledger),
@@ -578,8 +743,17 @@ def delegation_payload() -> dict:
         canonical = json.loads(CANONICAL_CALIBRATION_FILE.read_text(encoding="utf-8"))
         payload["canonical_numbers"] = {
             k: canonical.get(k)
-            for k in ("total", "correct", "incorrect", "mixed", "accuracy",
-                      "mean_brier", "decisive", "raw", "correlation_inflation")
+            for k in (
+                "total",
+                "correct",
+                "incorrect",
+                "mixed",
+                "accuracy",
+                "mean_brier",
+                "decisive",
+                "raw",
+                "correlation_inflation",
+            )
         }
     except Exception as exc:  # canonical missing/unreadable must be visible
         payload["canonical_numbers"] = None

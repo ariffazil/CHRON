@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Optional
 
 DEBT_FILE = Path("/root/chron/data/attention_debt.jsonl")
-EVENTS_FILE = Path("/root/AAA/scripts/chron_events.json")
+EVENTS_FILE = Path("/root/chron/chron_events.json")
 
 CONSEQUENCE_WEIGHT = {"HIGH": 3.0, "MEDIUM": 2.0, "LOW": 1.0}
 DEFAULT_WEIGHT = 2.0
@@ -213,8 +213,35 @@ def _reconcile_open_items(open_items: list[dict]) -> list[dict]:
             if resolved:
                 continue
         if did and src == "unresolved_event":
-            # An event id is not a prediction id, so membership in `finished` can
-            # never match directly — the discharge runs through the arrow join.
+            # REALITY-CLOSURE-PROTOCOL v0.1 (F13 SAH 2026-10-07): an event
+            # with a resolution record carrying evidence_ref is closed in
+            # reality. A stale OPEN row in the JSONL predates that resolution
+            # (the collector ran before chron_resolve_event landed, or the
+            # chron-loop-closer re-minted the debt). The collector's own
+            # check (collect_unresolved_high_events line 313) excludes the
+            # event by reading the events file fresh, but the persisted row
+            # still lives in the JSONL and is promoted by the dedup step.
+            # Read the events file once, by ref_id, and resolve if closed.
+            try:
+                ev_path = EVENTS_FILE
+                ev_data = json.loads(ev_path.read_text())
+                ev_match = next(
+                    (e for e in ev_data.get("events", [])
+                     if e.get("id") == ref),
+                    None,
+                )
+            except Exception:
+                ev_match = None  # unreadable events file → keep claim (F2 fail-visible)
+            if ev_match and (ev_match.get("resolution") or {}).get("evidence_ref"):
+                resolved = _resolve_debt(
+                    did,
+                    f"auto-reconciled: event {ref} has resolution record with "
+                    f"evidence_ref in chron_events.json (REALITY-CLOSURE-PROTOCOL v0.1)",
+                )
+                if resolved:
+                    continue
+            # Fall through to the arrow join: even if the event has no
+            # explicit resolution, its bound predictions may be closed.
             try:
                 closed = _discharged_arrows(ref)
             except Exception:
@@ -305,6 +332,12 @@ def collect_unresolved_high_events() -> list[dict]:
 
         # Only flag events whose target date has passed
         if target > now:
+            continue
+
+        # Explicit event resolution (REALITY-CLOSURE-PROTOCOL v0.1, F13-ratified
+        # 2026-10-07): an event carrying a resolution record with evidence is
+        # discharged — reality already closed it; a debt label here would be stale.
+        if (event.get("resolution") or {}).get("evidence_ref"):
             continue
 
         try:
@@ -526,13 +559,38 @@ def _compute_growth_rate(current_ad: float) -> Optional[float]:
 
 
 def get_attention_debt() -> dict:
-    """Full Attention Debt report for MCP surface."""
+    """Full Attention Debt report for MCP surface.
+
+    The persisted ledger is append-only snapshot history: the same debt_id can
+    appear OPEN, RESOLVED, and OPEN again. `total_ad`/`item_count` are the LIVE
+    recomputation; `ledger` exposes the historical rows separately so a reader
+    cannot mistake 66 historical OPEN rows for 66 current debts.
+    """
     items = collect_current_debt()
     result = compute_attention_debt(items)
 
     # Record snapshot for trend tracking
     _snapshot_ad(result["total_ad"], result["item_count"])
 
+    ledger = _load_all_debt()
+    latest: dict[str, dict] = {}
+    for item in ledger:
+        latest[item.get("debt_id")] = item
+    latest_status: dict[str, int] = {}
+    for item in latest.values():
+        status = item.get("status", "UNKNOWN")
+        latest_status[status] = latest_status.get(status, 0) + 1
+    result["ledger"] = {
+        "rows": len(ledger),
+        "unique_ids": len(latest),
+        "historical_open_rows": sum(1 for i in ledger if i.get("status") == "OPEN"),
+        "latest_status": latest_status,
+        "current_open": result["item_count"],
+        "note": (
+            "historical_open_rows is append-only history; latest_status is the "
+            "latest row per debt_id; current_open is the live recomputation."
+        ),
+    }
     return result
 
 

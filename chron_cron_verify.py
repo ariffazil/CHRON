@@ -74,6 +74,29 @@ def main() -> int:
         f"unverifiable={calibration.get('unverifiable')}"
     )
 
+    # ── GOL: gut-override calibration, wired to THIS timer (2026-10-04, FI-003) ──
+    # Spec: /root/AAA/instructions/gut-override-ledger-spec.md (F13_RATIFIED_CHAT
+    # 2026-10-03 + FI-008 amendment 2026-10-04).
+    #
+    # Why here and not in a new cron: an instrument nobody runs is
+    # indistinguishable from one that does not exist — the defect class the
+    # 2026-10-03 shadow audit found five times over. `chron-prediction-verifier.timer`
+    # already fires daily at 07:00 MYT with Persistent=true, so joining GOL to it
+    # means the human-override arm is scored on the same pass as the model arm,
+    # with no new scheduler and no new failure mode to forget about.
+    #
+    # Fail-soft by design: a GOL error must never break prediction verification.
+    # The prediction arm is the load-bearing one; GOL reports UNKNOWN rather than
+    # taking the whole run down with it.
+    try:
+        from chron.chron_gut_override import (
+            calibration_by_gut_override,
+            format_gut_report,
+        )
+        print(format_gut_report(calibration_by_gut_override()))
+    except Exception as e:  # noqa: BLE001
+        print(f"  Gut-Override Ledger (GOL): UNAVAILABLE — {type(e).__name__}: {e}")
+
     return 0
 
 

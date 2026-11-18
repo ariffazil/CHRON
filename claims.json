@@ -1,0 +1,44 @@
+{
+  "repo": "CHRON",
+  "generated_at": "2026-11-18T08:10:00Z",
+  "generator": "claims_drift_check.py / runtime witness (2026-11-18 reconciliation)",
+  "license_note": "witnessed runtime claims — regenerate on surface changes",
+  "claims": [
+    {
+      "claim_id": "surface.tool_count",
+      "statement": "Live exposed tool count",
+      "value": 24,
+      "derivation": "MCP tools/list 127.0.0.1:18102/mcp + server.py @mcp.tool count",
+      "evidence_path": "runtime",
+      "stability": "runtime-derived",
+      "observed_at": "2026-11-18T08:10:00Z"
+    },
+    {
+      "claim_id": "docs.readme_tool_claims",
+      "statement": "Counts asserted in README.md",
+      "value": [24],
+      "derivation": "README.md SOT-MANIFEST & MCP surface table",
+      "evidence_path": "README.md",
+      "stability": "generated"
+    },
+    {
+      "claim_id": "docs.llms_txt",
+      "statement": "Machine discovery surface present",
+      "value": {
+        "exists": true,
+        "tools_documented": 24
+      },
+      "derivation": "filesystem",
+      "evidence_path": "llms.txt",
+      "stability": "generated"
+    },
+    {
+      "claim_id": "surface.prefix_violations",
+      "statement": "Tools outside 'chron_' namespace",
+      "value": [],
+      "derivation": "prefix filter over tools/list",
+      "evidence_path": "runtime",
+      "stability": "runtime-derived"
+    }
+  ]
+}
