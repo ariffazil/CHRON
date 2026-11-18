@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 MYT = timezone(timedelta(hours=8))
-CHRON_EVENTS = Path("/root/AAA/scripts/chron_events.json")
+CHRON_EVENTS = Path("/root/chron/chron_events.json")
 
 
 def _now_iso() -> str:

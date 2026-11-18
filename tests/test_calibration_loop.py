@@ -27,7 +27,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, "/root")
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(_ROOT.parent))
 
 from chron import chron_prediction as cp  # noqa: E402
 from chron import chron_learn as cl  # noqa: E402
@@ -204,6 +206,12 @@ def test_generator_consumes_calibration_and_lessons():
     and replaces create_prediction with a recorder, so nothing is written to any
     live store.
     """
+    aaa_events = Path("/root/AAA/scripts/chron_events.json")
+    host_events = Path("/root/chron/chron_events.json")
+    if not aaa_events.exists() or not host_events.exists():
+        import pytest
+        pytest.skip("host chron_events.json fixtures absent in clean CI checkout")
+
     tmp = Path(tempfile.mkdtemp(prefix="chron-calib-test-"))
     pred_file = tmp / "predictions.jsonl"
     pred_file.touch()
@@ -408,16 +416,17 @@ def test_blind_lesson_is_not_a_learned_policy():
     check("no-cause lesson without a measurement is not actionable",
           cl.is_actionable_lesson(dict(named, mean_brier=None)), False)
 
-    # And the live store: the real rows must be excluded from promotion.
-    live = cl.load_lessons()
-    actionable_live = [l for l in live if cl.is_actionable_lesson(l)]
-    check("every lesson in the live store is blind", len(actionable_live), 0)
-    check_true("live store is non-empty (the check is not vacuous)", len(live) > 0, f"{len(live)} lessons")
-    check("live promotion candidates exclude them",
-          [c for c in cl.get_candidates() if c.get("error_type") == "UNKNOWN"], [])
+    # And the live store (host only): real rows must be excluded from promotion.
+    if cl.LESSONS_FILE.exists():
+        live = cl.load_lessons()
+        actionable_live = [l for l in live if cl.is_actionable_lesson(l)]
+        check("every lesson in the live store is blind", len(actionable_live), 0)
+        check_true("live store is non-empty (the check is not vacuous)", len(live) > 0, f"{len(live)} lessons")
+        check("live promotion candidates exclude them",
+              [c for c in cl.get_candidates() if c.get("error_type") == "UNKNOWN"], [])
 
-    health = cl.lesson_health()
-    check("blind_lesson_share is 1.0 on the live store", health["blind_lesson_share"], 1.0)
+        health = cl.lesson_health()
+        check("blind_lesson_share is 1.0 on the live store", health["blind_lesson_share"], 1.0)
 
 
 # ───────────────────────── script mode ─────────────────────────

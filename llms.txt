@@ -14,7 +14,7 @@ Event -> Prediction -> Verification -> Gap/Error -> Calibration & Lesson
 - Never executes infrastructure mutations (`A-FORGE :7071/:7072` executes).
 - Never seals VAULT999 truth directly (`888-APEX` / sovereign `F13` seals).
 
-## Live MCP Surface (24 tools on host `:18102`; 19 tools on `origin/main` commit `610b58d`)
+## Live MCP Surface (24 tools reconciled across `main` and `:18102`)
 
 ### Prediction & Verification
 - `chron_predictions_due`: Surface predictions whose verification window is due.
@@ -23,7 +23,7 @@ Event -> Prediction -> Verification -> Gap/Error -> Calibration & Lesson
 - `chron_generate_predictions`: Generate structured predictions from event definitions.
 - `chron_record_verification`: Record ground-truth outcomes for due predictions.
 - `chron_resolve_unverifiable`: Resolve predictions that cannot be empirically tested.
-- `chron_amend_verification`: Overlay a correction on an existing verification record *(live branch; pending sync to `main`)*.
+- `chron_amend_verification`: Overlay a correction on an existing verification record.
 
 ### Calibration & Learning
 - `chron_calibration_state`: Aggregate Brier score, accuracy, Wilson 95% CI, and quality band.
@@ -36,15 +36,15 @@ Event -> Prediction -> Verification -> Gap/Error -> Calibration & Lesson
 - `chron_temporal_briefing`: Executive temporal briefing for agent session init.
 - `chron_attention_debt`: Attention Debt (`AD`) backlog and daily growth rate.
 - `chron_reconcile_state`: Reconcile state across horizons and ledgers.
-- `chron_timing_audit`: Timing audit & freshness contract checks *(live branch; pending sync to `main`)*.
-- `chron_resolve_event`: Mark a temporal event resolved *(live branch; pending sync to `main`)*.
+- `chron_timing_audit`: Timing audit & freshness contract checks.
+- `chron_resolve_event`: Mark a temporal event resolved with `evidence_ref`.
 
 ### Proxy-Reality, Witness & Clock
 - `chron_proxy_reality_register`: Register paired proxy vs ground-truth metrics.
 - `chron_proxy_reality_observe`: Record proxy/reality observations.
 - `chron_proxy_reality_state`: Compute proxy-reality divergence / correlation.
-- `chron_frame_witness`: Cross-organ witness bridge to FRAME `:18085` *(live branch; pending sync to `main`)*.
-- `chron_time_now`: Read authoritative wall-clock + timezone state *(live branch; pending sync to `main`)*.
+- `chron_frame_witness`: Cross-organ witness bridge to FRAME `:18085`.
+- `chron_time_now`: Read authoritative wall-clock + monotonic state.
 
 ### Store & Loop Diagnostics
 - `chron_store_stats`: Episode/prediction/lesson counts and store health.

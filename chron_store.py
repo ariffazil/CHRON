@@ -36,6 +36,30 @@ STORE_GENERATION = "gen-2026-09-21T13-05Z"
 SCHEMA_VERSION = "chron-store/2.0"
 COMPACTION_RECEIPT = os.environ.get("CHRON_COMPACTION_RECEIPT")  # None unless signed
 
+# 2026-10-21 F13-authorized canary: read-only virtual aliases
+CHRON_ENABLE_VIRTUAL_ALIASES = os.environ.get(
+    "CHRON_ENABLE_VIRTUAL_ALIASES", "on"
+).lower() not in ("", "0", "false", "off")
+
+
+def _project_virtual_aliases(doc: Optional[dict]) -> Optional[dict]:
+    """Read-only virtual aliases projection.
+
+    Rules (mandated by F13):
+      - valid_at maps to valid_time
+      - created_at maps to known_at
+      - No JSONL rewrite, migration, backfill, or canonical-field rename
+      - invalid_at remains unresolved
+    """
+    if doc is None or not CHRON_ENABLE_VIRTUAL_ALIASES:
+        return doc
+    out = dict(doc)
+    if "valid_time" in out and "valid_at" not in out:
+        out["valid_at"] = out["valid_time"]
+    if "known_at" in out and "created_at" not in out:
+        out["created_at"] = out["known_at"]
+    return out
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -135,14 +159,14 @@ class ChronStore:
         self.store_dir.mkdir(parents=True, exist_ok=True)
 
     def _load_index(self):
-        """Rebuild index from JSONL if index missing or stale."""
-        if self.index_file.exists():
-            try:
-                self._index = json.loads(self.index_file.read_text())
-                return
-            except Exception:
-                pass
-        # Rebuild from JSONL
+        """Rebuild index from JSONL on load — JSONL is the source of truth.
+
+        The index.json on disk is a write-time cache that lags every append
+        (append() updates the in-memory index but defers the disk write per
+        Phase 0). Trusting it on restart served stale query() results (missing
+        the newest episodes). Rebuild fresh from JSONL so query()/latest() are
+        correct after restart. Repair receipt: 2026-10-16 CHRON index-lag fix.
+        """
         self._rebuild_index()
 
     def _rebuild_index(self):
@@ -224,7 +248,7 @@ class ChronStore:
                 try:
                     ep = json.loads(line)
                     if ep.get("episode_id") == episode_id:
-                        return ep
+                        return _project_virtual_aliases(ep)
                 except json.JSONDecodeError:
                     continue
         return None
@@ -244,13 +268,13 @@ class ChronStore:
                 continue
             if principal and meta.get("principal") != principal:
                 continue
-            vt = meta.get("valid_time", "")
+            vt = meta.get("valid_time") or ""
             if since and vt < since:
                 continue
             if until and vt > until:
                 continue
-            results.append(meta)
-        results.sort(key=lambda x: x.get("valid_time", ""), reverse=True)
+            results.append(_project_virtual_aliases(meta))
+        results.sort(key=lambda x: x.get("valid_time") or "", reverse=True)
         return results[:limit]
 
     def count(self) -> int:

@@ -38,6 +38,19 @@ LESSONS_FILE = Path("/root/chron/data/lessons.jsonl")
 POLICY_CANDIDATES_FILE = Path("/root/chron/data/policy_candidates.jsonl")
 LOOP_LOG = Path("/root/chron/data/loop_log.jsonl")
 
+# BL02 per-actor calibration. The producer lives OUTSIDE this repo
+# (/root/scripts), but its artifact has a real downstream consumer:
+# fed_router.py:49 `_CALIB_FILE` reads it to apply the BL12 REDUCE_WEIGHT
+# routing penalty. A consumer with no scheduled producer reads a stale artifact
+# forever, and that silence reads as health — measured 2026-10-02: the artifact
+# existed, `crontab -l | grep -ci bl02` was 0, and no unit/timer invoked it.
+# The loop-closer therefore owns the refresh, on the EXISTING
+# chron-loop-closer.timer (daily 07:15 MYT). No new cron, no new timer
+# (event-driven-first doctrine, F13 2026-09-20).
+BL02_PRODUCER = Path("/root/scripts/bl02_calibration_curves.py")
+BL02_ARTIFACT = Path("/root/chron/data/calibration_per_actor.json")
+BL02_TIMEOUT_S = 120
+
 MYT = timezone(timedelta(hours=8))
 
 # Best-effort outbound steps that must never fail the loop, but must never fail
@@ -109,6 +122,7 @@ def arrow_outcome_to_learning(dry_run: bool = False) -> dict:
     if not dry_run:
         try:
             from chron.chron_early_falsifier_scan import main as _binding_scan
+
             _binding_scan()
             result["binding_scan"] = "/root/chron/data/binding_scan.json"
         except Exception as exc:
@@ -137,7 +151,11 @@ def arrow_experience_to_memory(dry_run: bool = False) -> dict:
             "arrow": "EXPERIENCE → MEMORY",
             "timestamp": _now_iso(),
             "bridge": {"status": "SKIPPED", "new_receipts": 0, "episodes_created": 0},
-            "fq_poll": {"status": "SKIPPED", "significant_transitions": 0, "episodes_created": 0},
+            "fq_poll": {
+                "status": "SKIPPED",
+                "significant_transitions": 0,
+                "episodes_created": 0,
+            },
             "store": {"total_episodes": None, "episodes_last_24h": None},
             "status": "DRY_RUN_SKIPPED",
         }
@@ -264,6 +282,9 @@ def arrow_memory_to_policy(dry_run: bool = False) -> dict:
         "promoted": len(promoted),
         "held": len(held),
         "policy_candidates_written": written,
+        "policy_candidates_unique_total": (
+            policy_candidates_unique_total() if not dry_run else None
+        ),
         "promotions": promoted,
         "holds": held,
         "criteria": ["recurrence", "measured_effect"],
@@ -309,7 +330,9 @@ def _measured_effect(lesson: dict) -> dict:
 
     def _in_class(rows: list[dict]) -> int:
         return sum(
-            1 for v in rows if str(v.get("error_type") or "").strip().upper() == error_type
+            1
+            for v in rows
+            if str(v.get("error_type") or "").strip().upper() == error_type
         )
 
     evidence = {
@@ -355,11 +378,15 @@ def _evaluate_promotion(lesson: dict) -> dict:
     classifiable = error_type in INTERPRETABLE_ERROR_TYPES
 
     recurrence_met = recurrence >= CRITERION_RECURRENCE_MIN
-    effect = _measured_effect(lesson) if classifiable else {
-        "state": "NOT_EVALUATED_UNCLASSIFIABLE",
-        "met": False,
-        "evidence": {"reason": f"error class {error_type!r} names no cause"},
-    }
+    effect = (
+        _measured_effect(lesson)
+        if classifiable
+        else {
+            "state": "NOT_EVALUATED_UNCLASSIFIABLE",
+            "met": False,
+            "evidence": {"reason": f"error class {error_type!r} names no cause"},
+        }
+    )
 
     criteria = {
         "recurrence": {
@@ -377,7 +404,9 @@ def _evaluate_promotion(lesson: dict) -> dict:
     else:
         missing = []
         if not classifiable:
-            missing.append(f"precondition:classifiable (error class {error_type!r} names no cause)")
+            missing.append(
+                f"precondition:classifiable (error class {error_type!r} names no cause)"
+            )
         if not recurrence_met:
             missing.append(f"recurrence ({recurrence} < {CRITERION_RECURRENCE_MIN})")
         if classifiable and effect.get("state") == "NOT_YET_MEASURABLE":
@@ -404,22 +433,74 @@ def _evaluate_promotion(lesson: dict) -> dict:
     }
 
 
+def _policy_candidate_ids() -> set:
+    """candidate_ids already present in the ledger (for idempotent append)."""
+    ids: set = set()
+    if not POLICY_CANDIDATES_FILE.exists():
+        return ids
+    try:
+        with open(POLICY_CANDIDATES_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    cid = json.loads(line).get("candidate_id")
+                except Exception:
+                    continue
+                if cid:
+                    ids.add(cid)
+    except OSError:
+        return ids
+    return ids
+
+
+def policy_candidates_unique_total() -> int:
+    """Physical rows are not candidates. Report both numbers or neither."""
+    return len(_policy_candidate_ids())
+
+
 def _write_policy_candidates(promoted: list[dict]) -> int:
-    """Append promoted lessons to the policy-candidate ledger.
+    """Append promoted lessons to the policy-candidate ledger. Idempotent per candidate.
 
     POLICY_CANDIDATES_FILE was defined and never written before 2026-09-21: the
     arrow could report `promoted: 1` and leave no artifact behind, so a promotion
     existed only inside a log line. Append-only; supersession, never rewrite.
+
+    2026-11-16 (measured): the arrow re-promoted the same lesson on every run and
+    appended near-identical rows. The file held **16 rows and 1 unique
+    candidate_id** (`polcand-lesson-range_stale_at_mint-2`). A row count is not a
+    candidate count; sixteen rows read as sixteen promotions is a 16x inflation.
+    Existing rows are left untouched — they are evidence of the defect — and
+    future runs are idempotent. Each new row also carries an explicit attribution
+    record: promotion is a proposal, not proof that anything changed.
     """
     if not promoted:
         return 0
     POLICY_CANDIDATES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    existing = _policy_candidate_ids()
+    try:
+        try:
+            from chron.chron_causal_contract import attribution_record
+        except ImportError:
+            from chron_causal_contract import attribution_record  # type: ignore
+        attribution = attribution_record()
+    except Exception:  # pragma: no cover
+        attribution = {
+            "behaviour_change_attribution": "UNKNOWN",
+            "learning_loop_contribution": "NOT_ESTABLISHED",
+        }
+    written = 0
     with open(POLICY_CANDIDATES_FILE, "a") as f:
         for p in promoted:
+            candidate_id = f"polcand-{p['lesson_id']}"
+            if candidate_id in existing:
+                continue
+            existing.add(candidate_id)
             f.write(
                 json.dumps(
                     {
-                        "candidate_id": f"polcand-{p['lesson_id']}",
+                        "candidate_id": candidate_id,
                         "lesson_id": p["lesson_id"],
                         "error_type": p["error_type"],
                         "recurrence": p["recurrence"],
@@ -435,12 +516,18 @@ def _write_policy_candidates(promoted: list[dict]) -> int:
                             "authorised deployment (F13/kernel) — this candidate "
                             "carries evidence, not authority"
                         ),
+                        # A promotion is not an outcome. Without the chain
+                        # (candidate → authorisation → artifact → deploy receipt
+                        # → runtime observation) no behaviour change may be
+                        # attributed to this lesson.
+                        "attribution": attribution,
                     },
                     default=str,
                 )
                 + "\n"
             )
-    return len(promoted)
+            written += 1
+    return written
 
 
 # ───────────────────────── STATE SNAPSHOT ─────────────────────────
@@ -467,7 +554,9 @@ def _store_state() -> dict:
     store = get_store()
     ledger = _verified(limit=10000)
     decisive = [
-        v for v in ledger if v.get("verdict") in ("VERIFIED_CORRECT", "VERIFIED_INCORRECT")
+        v
+        for v in ledger
+        if v.get("verdict") in ("VERIFIED_CORRECT", "VERIFIED_INCORRECT")
     ]
     lessons = load_lessons()
 
@@ -502,6 +591,91 @@ def _run_step(name: str, fn, *args, **kwargs) -> dict:
         return {"ok": True, "result": fn(*args, **kwargs), "error": None}
     except Exception as e:  # noqa: BLE001 — a loop must survive its parts
         return {"ok": False, "result": None, "error": f"{type(e).__name__}: {e}"}
+
+
+# ───────────────────── BL02 CALIBRATION PRODUCER ─────────────────────
+
+
+def _bl02_artifact_view() -> dict:
+    """Read the BL02 artifact as DATA. Absent/corrupt is a state, not an exception."""
+    if not BL02_ARTIFACT.exists():
+        return {"present": False}
+    try:
+        doc = json.loads(BL02_ARTIFACT.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 — reported as a state below
+        return {"present": True, "readable": False, "error": f"{type(e).__name__}: {e}"}
+    attribution = doc.get("attribution") or {}
+    vocabulary = attribution.get("vocabulary") or {}
+    return {
+        "present": True,
+        "readable": True,
+        "schema": doc.get("schema"),
+        "generated_utc": doc.get("generated_utc"),
+        "routable_actors": attribution.get("routable_actors"),
+        "actor_buckets": sorted((doc.get("per_actor") or {}).keys()),
+        "vocabulary_source": vocabulary.get("vocabulary_source"),
+        "owner_on_master": vocabulary.get("owner_on_master"),
+    }
+
+
+def _refresh_bl02_calibration() -> dict:
+    """Regenerate the per-actor calibration artifact that FED routing consumes.
+
+    Consumption = governance: fed_router.py:49 `_CALIB_FILE` reads BL02_ARTIFACT
+    to apply the BL12 REDUCE_WEIGHT routing penalty. Measured 2026-10-02, nothing
+    regenerated that artifact on any schedule (`crontab -l | grep -ci bl02` = 0,
+    no unit or timer referenced the producer), so the router's advisory was only
+    ever as fresh as the last manual run — and a stale advisory is
+    indistinguishable from a healthy one.
+
+    Failures RAISE, so _run_step records them and the loop reports DEGRADED with
+    the step named. A dark producer must not look like a quiet loop.
+    """
+    before = _bl02_artifact_view()
+
+    if not BL02_PRODUCER.exists():
+        raise RuntimeError(f"BL02 producer absent: {BL02_PRODUCER}")
+
+    import subprocess
+
+    proc = subprocess.run(
+        ["/usr/bin/python3", str(BL02_PRODUCER)],
+        capture_output=True,
+        text=True,
+        timeout=BL02_TIMEOUT_S,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"BL02 producer exited {proc.returncode}: "
+            f"{(proc.stderr or proc.stdout or '').strip()[-400:]}"
+        )
+
+    after = _bl02_artifact_view()
+    if not after.get("readable"):
+        raise RuntimeError(
+            f"BL02 artifact unreadable after refresh: {after.get('error')}"
+        )
+    # Proves the write actually landed instead of trusting the exit code: the
+    # producer stamps generated_utc with microseconds on every run.
+    if after.get("generated_utc") == before.get("generated_utc"):
+        raise RuntimeError(
+            "BL02 generated_utc unchanged after a successful producer run "
+            f"({after.get('generated_utc')}) — producer did not write the file we read"
+        )
+
+    return {
+        "arrow": "CALIBRATION → ROUTING ADVISORY",
+        "status": "REFRESHED",
+        "consumer": "fed_router.py:49 _CALIB_FILE (BL12 routing penalty)",
+        "schedule": "chron-loop-closer.timer (existing, daily 07:15 MYT) — no new cron",
+        "before": before,
+        "after": after,
+        "delta": {
+            "routable_actors": (after.get("routable_actors") or 0)
+            - (before.get("routable_actors") or 0),
+        },
+        "error": None,
+    }
 
 
 # ───────────────────────── FULL LOOP ─────────────────────────
@@ -540,9 +714,11 @@ def run_full_loop(dry_run: bool = False) -> dict:
     from chron.chron_prediction import generate_from_chron_events, get_active
 
     active_before = len(get_active())
-    gen = _run_step("events_to_predictions", generate_from_chron_events) if not dry_run else {
-        "ok": True, "result": [], "error": None
-    }
+    gen = (
+        _run_step("events_to_predictions", generate_from_chron_events)
+        if not dry_run
+        else {"ok": True, "result": [], "error": None}
+    )
     if not gen["ok"]:
         errors.append({"step": "events_to_predictions", "error": gen["error"]})
     new_preds = gen["result"] or []
@@ -554,9 +730,9 @@ def run_full_loop(dry_run: bool = False) -> dict:
             "active_before": active_before,
             "active_after": active_after,
         },
-        "status": "ERROR" if not gen["ok"] else (
-            "GENERATED" if new_preds else "ALREADY_CURRENT"
-        ),
+        "status": "ERROR"
+        if not gen["ok"]
+        else ("GENERATED" if new_preds else "ALREADY_CURRENT"),
         "error": gen["error"],
     }
 
@@ -596,12 +772,34 @@ def run_full_loop(dry_run: bool = False) -> dict:
     else:
         result["arrows"]["memory_to_policy"] = pol["result"]
 
+    # BL02 producer step — regenerates the calibration artifact that FED routing
+    # already reads (fed_router.py:49). Skipped on a dry pass because a dry run
+    # writes nothing at all (invariant established 2026-09-18).
+    if dry_run:
+        result["arrows"]["bl02_calibration"] = {
+            "arrow": "CALIBRATION → ROUTING ADVISORY",
+            "status": "SKIPPED_DRY_RUN",
+            "error": None,
+        }
+    else:
+        bl02 = _run_step("bl02_calibration", _refresh_bl02_calibration)
+        if not bl02["ok"]:
+            errors.append({"step": "bl02_calibration", "error": bl02["error"]})
+            result["arrows"]["bl02_calibration"] = {
+                "arrow": "CALIBRATION → ROUTING ADVISORY",
+                "status": "ERROR",
+                "error": bl02["error"],
+            }
+        else:
+            result["arrows"]["bl02_calibration"] = bl02["result"]
+
     result["completed_at"] = _now_iso()
 
     # ── DELTA: what changed because of this run ──
     e2m = result["arrows"].get("experience_to_memory", {})
     o2l = result["arrows"].get("outcome_to_learning", {})
     m2p = result["arrows"].get("memory_to_policy", {})
+    bl02r = result["arrows"].get("bl02_calibration", {})
     episodes_after = get_store().count()
     delta = {
         "episodes_created": episodes_after - episodes_before,
@@ -613,11 +811,16 @@ def run_full_loop(dry_run: bool = False) -> dict:
             (o2l.get("verify_result") or {}).get("verified_correct", 0)
             + (o2l.get("verify_result") or {}).get("verified_incorrect", 0)
         ),
-        "predictions_new": (result["arrows"]["events_to_predictions"]["delta"]
-                            .get("new_generated", 0)),
+        "predictions_new": (
+            result["arrows"]["events_to_predictions"]["delta"].get("new_generated", 0)
+        ),
         "lessons_extracted": o2l.get("lessons_extracted", 0),
         "outcomes_unclassified": o2l.get("outcomes_unclassified", 0),
         "policies_promoted": m2p.get("promoted", 0),
+        # A LEVEL, not a change: how many actors FED routing can currently steer.
+        # Excluded from the ACTIVE test below — a nonzero count is a property of
+        # the store, not something this run did. None means the step did not run.
+        "bl02_routable_actors": (bl02r.get("after") or {}).get("routable_actors"),
     }
 
     # ── STATE: what is true after this run ──
@@ -635,8 +838,10 @@ def run_full_loop(dry_run: bool = False) -> dict:
     if errors:
         status = "DEGRADED"
     elif any(
-        v for k, v in delta.items()
-        if k not in ("predictions_new", "episodes_created_reported")
+        v
+        for k, v in delta.items()
+        if k
+        not in ("predictions_new", "episodes_created_reported", "bl02_routable_actors")
     ):
         status = "ACTIVE"
     else:
@@ -690,7 +895,10 @@ def _inject_carry_forward(summary: dict) -> tuple[bool, str | None]:
         )
         if result.returncode == 0:
             return True, None
-        return False, f"carry_forward exited {result.returncode}: {(result.stderr or '').strip()[:120]}"
+        return (
+            False,
+            f"carry_forward exited {result.returncode}: {(result.stderr or '').strip()[:120]}",
+        )
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
 

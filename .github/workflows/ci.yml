@@ -1,0 +1,47 @@
+name: CHRON CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chron-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: github.actor != 'dependabot[bot]' && github.actor != 'app/dependabot'
+    name: Lockfile, Privacy Hygiene & Pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Human-event & backup hygiene check
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -E '^(data/|chron_events\.json$|HELD-|\.unit-backup-.*\.service$)'; then
+            echo "ERROR: prohibited runtime store or backup unit tracked in git"
+            exit 1
+          fi
+          echo "Hygiene check passed"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Validate lockfile & sync dependencies
+        run: |
+          uv lock --check
+          uv sync --frozen --extra dev
+
+      - name: Run CHRON test suite
+        run: uv run --no-sync pytest -q

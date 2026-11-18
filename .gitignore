@@ -1,5 +1,10 @@
 __pycache__/
 *.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
 .backup-*
 *.bak*
 .*.bak*
@@ -7,8 +12,15 @@ __pycache__/
 .pre-canonical-*
 .snapshot-*
 *.sibling-*
+.unit-backup-*.service
 verify_log.jsonl
 verify_log.txt
+chron_events.json
 data/*.jsonl
 data/*.json
 !data/.gitkeep
+.chron_events.json.frozen-copy-*
+data/.archive/
+artifacts/
+*.db
+*.sqlite*

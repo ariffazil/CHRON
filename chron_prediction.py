@@ -12,14 +12,80 @@ DITEMPA BUKAN DIBERI ⚒️
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
+# 2026-10-31: the attribution vocabulary lives in chron_attribution (single owner).
+# Imported defensively so a partial install degrades to "no actor resolvable"
+# rather than failing prediction generation outright.
+try:
+    from chron_attribution import AUDIENCE_TOKENS, KNOWN_AGENTS
+except ImportError:  # pragma: no cover
+    try:
+        from .chron_attribution import AUDIENCE_TOKENS, KNOWN_AGENTS  # type: ignore
+    except ImportError:
+        AUDIENCE_TOKENS = {
+            "",
+            "all",
+            "arif",
+            "both",
+            "federation",
+            "none",
+            "null",
+            "shared",
+            "syed",
+            "unknown",
+        }
+        KNOWN_AGENTS: dict[str, str] = {}
+
 PREDICTIONS_FILE = Path("/root/chron/data/predictions.jsonl")
 CALIBRATION_FILE = Path("/root/chron/data/calibration.json")
+
+
+def policy_gate_note() -> str:
+    """Explanatory text for the promotion gate, DERIVED from the live gate.
+
+    WHY THIS FUNCTION EXISTS (2026-11-16): this note used to be a static string
+    reading "none yet meets the promotion gate (external validation is not
+    implemented)". Criterion 3 (external validation) was DROPPED on 2026-09-21
+    — chron_learn.py:19, chron_loop_close.py:210. The note therefore explained
+    a decision using a rule that no longer existed: governance
+    misrepresentation. Executable policy and explanatory policy must be the
+    same policy. The text is now computed from the gate's own constants; if the
+    gate changes, the explanation follows, and on import failure it degrades to
+    a conservative statement that names no dead criterion.
+    """
+    try:
+        try:
+            from chron.chron_loop_close import (
+                CRITERION_RECURRENCE_MIN,
+                CRITERION_MIN_AFTER_OUTCOMES,
+                CRITERION_3_DROPPED,
+            )
+        except ImportError:  # service runs with cwd=/root/chron and PYTHONPATH=/root
+            from chron_loop_close import (  # type: ignore
+                CRITERION_RECURRENCE_MIN,
+                CRITERION_MIN_AFTER_OUTCOMES,
+                CRITERION_3_DROPPED,
+            )
+        return (
+            "no lesson is applied as policy: promotion requires recurrence >= "
+            f"{CRITERION_RECURRENCE_MIN} decisive INCORRECT outcomes in one error "
+            "class AND a measured fall in that class's share over >= "
+            f"{CRITERION_MIN_AFTER_OUTCOMES} post-lesson decisive outcomes; "
+            f"{CRITERION_3_DROPPED} was DROPPED 2026-09-21 and is not a criterion; "
+            "blind (UNKNOWN-class) lessons are diagnostics, not rules"
+        )
+    except Exception:  # pragma: no cover - defensive: never block generation
+        return (
+            "no lesson is applied as policy: promotion requires recurrence and a "
+            "measured effect; external validation is not a criterion; blind "
+            "(UNKNOWN-class) lessons are diagnostics, not rules"
+        )
 
 
 def _emit_ariflow_predict(pred: dict) -> None:
@@ -91,8 +157,39 @@ def load_predictions() -> list[dict]:
     return predictions
 
 
+def _admissibility(prediction: dict) -> tuple[bool, list[str]]:
+    """QCOS Phase 0 selection rules (2026-11-14): falsifier + verification_method
+    + confidence range + verify_at are REQUIRED at birth. Read-only check."""
+    missing = []
+    if not str(
+        prediction.get("falsifier") or prediction.get("falsification_rule") or ""
+    ).strip():
+        missing.append("falsifier")
+    if not str(
+        prediction.get("verifier_method") or prediction.get("verifier") or ""
+    ).strip():
+        missing.append("verification_method")
+    conf = prediction.get("confidence")
+    if not (isinstance(conf, (int, float)) and 0 <= conf <= 1):
+        missing.append("confidence_range")
+    if not prediction.get("verify_at"):
+        missing.append("verify_at")
+    return (not missing), missing
+
+
 def save_prediction(prediction: dict) -> None:
-    """Append a single prediction to JSONL store."""
+    """Append a single prediction to JSONL store.
+
+    QCOS Phase 0 (2026-11-14, F13 'jalan'): stamps admissibility at birth.
+    Inadmissible predictions are STILL RECORDED (immutable ledger, never dropped)
+    but carry admissible=false + syndrome=EVIDENCE_GAP + reasons — the gap becomes
+    visible in data instead of invisible in prose.
+    """
+    ok, missing = _admissibility(prediction)
+    prediction.setdefault("admissible", ok)
+    if not ok:
+        prediction.setdefault("syndrome", "EVIDENCE_GAP")
+        prediction["inadmissible_reasons"] = missing
     PREDICTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(PREDICTIONS_FILE, "a") as f:
         f.write(json.dumps(prediction, default=str) + "\n")
@@ -119,6 +216,15 @@ def create_prediction(
     trigger: str = "manual",
     loop_id: Optional[str] = None,
     audience: str = "both",
+    # ── R-FILTER SCHEMA BUMP (2026-10-03) ──────────────────────────────────
+    # Companion to rationality-filter-doctrine.md. Optional list of classes
+    # for predictions that depend on data the corpus systematically
+    # underrepresents (gut instinct, leader decisions, private relationships,
+    # scar revisions). When non-empty, confidence is clamped to the
+    # corresponding ceiling — the model cannot claim high confidence on
+    # data it cannot see. See Q-MAP §13 (R-FILTER theorem).
+    rationality_filter_class: Optional[list[str]] = None,
+    rationality_filter_confidence_ceiling: float = 0.65,
     **extra,
 ) -> dict:
     """Create a new prediction object.
@@ -153,6 +259,14 @@ def create_prediction(
         "world_state_hash": world_state_hash,
         "success_rule": success_rule,
         "falsification_rule": falsification_rule,
+        # ── R-FILTER provenance (immutable) — 2026-10-03 schema bump ─────
+        # R-FILTER theorem: a prediction whose class depends on private data
+        # cannot carry confidence above the class ceiling. The clamp happens
+        # at birth, not at read time — the birth record is the witness.
+        "rationality_filter_class": list(rationality_filter_class or []),
+        "rationality_filter_confidence_ceiling": (
+            rationality_filter_confidence_ceiling if (rationality_filter_class) else 1.0
+        ),
         # ── Provenance (immutable) ──
         "source": source,
         "source_id": source_id,
@@ -167,9 +281,7 @@ def create_prediction(
         # and no explicit human-witness audience is UNBOUND, not ACTIVE.
         # Cron cannot close a door that was never attached.
         "status": (
-            "ACTIVE"
-            if (extra.get("probe_id") or audience == "arif")
-            else "UNBOUND"
+            "ACTIVE" if (extra.get("probe_id") or audience == "arif") else "UNBOUND"
         ),
         "binding": extra.get("probe_id")
         or ("HUMAN_WITNESS" if audience == "arif" else "NO_MACHINE_PROBE"),
@@ -187,6 +299,19 @@ def create_prediction(
         "lesson_id": None,
         "supersedes": None,
     }
+    # R-FILTER confidence clamp (2026-10-03 schema bump): if a non-empty
+    # rationality_filter_class is present, confidence may not exceed the
+    # class ceiling. This is the operational form of the theorem that says
+    # the model cannot claim high confidence on data the corpus systematically
+    # underrepresents. The clamp writes the witness into the birth record,
+    # not the read surface.
+    rfc = pred.get("rationality_filter_class") or []
+    if rfc:
+        ceiling = pred.get("rationality_filter_confidence_ceiling", 0.65)
+        if pred["confidence"] > ceiling:
+            pred["confidence"] = ceiling
+            pred["_rfilter_clamped"] = True
+
     pred.update(extra)
     save_prediction(pred)
 
@@ -207,6 +332,13 @@ def create_prediction(
 
 
 VERIFICATION_LOG = Path("/root/chron/data/verification_log.jsonl")
+# Reason-amendment ledger (append-only). A verdict is immutable; the STATED REASON
+# can be found inaccurate after the fact (wrong instrument, wrong numbers, analogy
+# presented as evidence). Re-recording is blocked by idempotency (_is_already_verified),
+# so without this file the only options were silence or history rewriting.
+# 2026-11-17 · failure class: "verdict published with a reason later measured wrong,
+# no amendment path; reader keeps the stale reason forever".
+CORRECTIONS_LOG = Path("/root/chron/data/verification_corrections.jsonl")
 
 # Canonical verdict vocabulary. Verification records are append-only and have
 # drifted across schemas, so reads normalise here instead of trusting the file.
@@ -278,6 +410,49 @@ def load_verifications() -> dict[str, dict]:
             if pid:
                 by_pred[pid] = rec
     return by_pred
+
+
+def load_corrections() -> dict[str, dict]:
+    """Latest reason-amendment per prediction_id (append-only ledger).
+
+    Corrections never change a verdict or a Brier score — only the STATED REASON
+    (observed_outcome / entailment / evidence_ref) that a reader sees. History is
+    kept: every amendment line persists with ``supersedes`` pointing at the
+    verification record it corrects.
+
+    Delta merge: a later correction that corrects only ONE field (e.g. coverage)
+    must not erase the earlier correction's entailment/outcome. Non-empty values
+    override; identity and timestamps always move to the latest line.
+    """
+    if not CORRECTIONS_LOG.exists():
+        return {}
+    by_pred: dict[str, dict] = {}
+    with open(CORRECTIONS_LOG) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            pid = rec.get("prediction_id")
+            if pid:
+                merged = by_pred.get(pid, {})
+                for k, v in rec.items():
+                    if k in ("correction_id", "corrected_at", "supersedes_correction_id"):
+                        merged[k] = v
+                    elif v not in (None, "", [], {}):
+                        merged[k] = v
+                by_pred[pid] = merged
+    return by_pred
+
+
+def append_correction(record: dict) -> None:
+    """Append one correction record. Append-only; never rewrites history."""
+    CORRECTIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(CORRECTIONS_LOG, "a") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def decided_ids() -> set[str]:
@@ -431,12 +606,113 @@ def get_verified(limit: int = 50, include_void: bool = False) -> list[dict]:
     """
     joined = []
     preds_by_id = {p["prediction_id"]: p for p in load_predictions()}
+    corrections = load_corrections()
 
     for pred_id, verif in load_verifications().items():
         verdict = _canonical_verdict(verif)
         if verdict == VERDICT_VOID and not include_void:
             continue
         birth = preds_by_id.get(pred_id, {})
+        # Provenance projection (2026-11-17). record_verification has always written
+        # this into the ledger; this read surface dropped it, so every downstream
+        # reader saw a verdict with no evidence pointer and no resolver. Same defect
+        # class as a green gate that examined nothing: the write kept the witness,
+        # the read hid it. Projection is additive and backward compatible.
+        res = verif.get("resolution") or {}
+        correction = corrections.get(pred_id) or {}
+        observed = verif.get("observed_outcome")
+        proj_evidence_ref = res.get("evidence_ref")
+        amended = False
+        # F13 2026-11-17: ONE effective explanation per verified row.
+        # A correction replaces the stated reason in the reader's view; the
+        # original resolution stays available under superseded_resolution with
+        # an explicit label. History is kept, but it is never presented as the
+        # current reason beside its own replacement.
+        effective = {
+            "criterion": res.get("criterion"),
+            "evidence_ref": res.get("evidence_ref"),
+            "outcome_time": res.get("outcome_time"),
+            "observation_time": res.get("observation_time"),
+            "coverage": res.get("coverage"),
+            "entailment": res.get("entailment"),
+            "resolver_id": res.get("resolver_id"),
+            "resolver_relation": res.get("resolver_relation"),
+            "time_status": res.get("time_status"),
+            "completeness": res.get("completeness"),
+        }
+        if correction:
+            observed = correction.get("corrected_observed_outcome") or observed
+            proj_evidence_ref = (
+                correction.get("corrected_evidence_ref") or proj_evidence_ref
+            )
+            amended = True
+            if correction.get("corrected_entailment"):
+                effective["entailment"] = correction["corrected_entailment"]
+            if correction.get("corrected_coverage"):
+                effective["coverage"] = correction["corrected_coverage"]
+            effective["evidence_ref"] = proj_evidence_ref
+            effective["amendment_id"] = correction.get("correction_id")
+            effective["amended_at"] = correction.get("corrected_at")
+            effective["amended_by"] = correction.get("corrected_by")
+        effective["effective"] = True
+        effective["superseded"] = bool(amended)
+        # Temporal scope is stated, never inferred silently. A correction
+        # corrects the reason; it does not re-date the prediction. Evidence
+        # observed after verify_at shows the state on the observation date,
+        # not the state inside the original window.
+        _target = birth.get("verify_at") or birth.get("target_date")
+        # When amended, the LATEST evidence is the corrected measurement, not
+        # the pre-correction observation time. Keep the original visible.
+        _observed_at = (
+            correction.get("corrected_at") if correction else ""
+        ) or res.get("observation_time")
+        _scope = {
+            "target_at": _target,
+            "evidence_observed_at": _observed_at,
+            "original_observation_time": res.get("observation_time"),
+        }
+        try:
+            from datetime import datetime as _dt
+
+            def _parse_ts(x):
+                return _dt.fromisoformat(str(x).replace("Z", "+00:00"))
+
+            if _target and _observed_at:
+                _gap = (
+                    _parse_ts(_observed_at) - _parse_ts(_target)
+                ).total_seconds() / 86400.0
+                _scope["gap_days"] = round(_gap, 2)
+                _scope["status"] = (
+                    "EVIDENCE_AFTER_TARGET" if _gap > 1.0 else "WITHIN_TARGET_WINDOW"
+                )
+                if _gap > 1.0:
+                    _scope["note"] = (
+                        f"Evidence observed {_gap:.1f} days after verify_at; the "
+                        "amendment corrects the stated reason, not the historical "
+                        "window. A dated verdict review is required if the original "
+                        "window is load-bearing."
+                    )
+            elif not _observed_at:
+                _scope["status"] = "NO_EVIDENCE_TIME"
+            else:
+                _scope["status"] = "NO_TARGET_TIME"
+        except Exception:
+            _scope["status"] = "UNPARSED_TIME"
+        effective["scope"] = _scope
+        superseded_resolution = None
+        if amended:
+            superseded_resolution = {
+                "superseded": True,
+                "superseded_by": correction.get("correction_id"),
+                "criterion": res.get("criterion"),
+                "evidence_ref": res.get("evidence_ref"),
+                "coverage": res.get("coverage"),
+                "entailment": res.get("entailment"),
+                "outcome_time": res.get("outcome_time"),
+                "observation_time": res.get("observation_time"),
+                "resolver_id": res.get("resolver_id"),
+                "resolver_relation": res.get("resolver_relation"),
+            }
         joined.append(
             {
                 **birth,
@@ -445,11 +721,36 @@ def get_verified(limit: int = 50, include_void: bool = False) -> list[dict]:
                 "verdict": verdict,
                 "orphan": not birth,
                 "verified_at": verif.get("verified_at"),
-                "observed_outcome": verif.get("observed_outcome"),
+                "verification_id": verif.get("verification_id"),
+                "observed_outcome": observed,
+                "observed_at": verif.get("observed_at") or res.get("observation_time"),
+                "outcome_evidence": verif.get("outcome_evidence") or proj_evidence_ref,
                 "brier_score": verif.get("brier_score"),
                 "error": verif.get("error"),
-                "error_type": verif.get("error_type") or (
-                    "UNKNOWN" if verdict == VERDICT_UNVERIFIABLE else "NONE"
+                "error_type": verif.get("error_type")
+                or ("UNKNOWN" if verdict == VERDICT_UNVERIFIABLE else "NONE"),
+                "witness_status": verif.get("witness_status"),
+                "witness_claim_id": verif.get("witness_claim_id"),
+                "resolution": effective,
+                "effective_resolution": effective,
+                "superseded_resolution": superseded_resolution,
+                "amended": amended,
+                "amendment": (
+                    {
+                        "correction_id": correction.get("correction_id"),
+                        "supersedes_verification_id": correction.get(
+                            "supersedes_verification_id"
+                        ),
+                        "reason": correction.get("reason"),
+                        "corrected_by": correction.get("corrected_by"),
+                        "corrected_at": correction.get("corrected_at"),
+                        "corrected_entailment": correction.get("corrected_entailment"),
+                        "corrected_evidence_ref": correction.get(
+                            "corrected_evidence_ref"
+                        ),
+                    }
+                    if amended
+                    else None
                 ),
             }
         )
@@ -518,7 +819,11 @@ def verify_prediction(
         error = 0.0 if correct else 1.0
         if correct:
             error_type = "NONE"
-        elif error_class and str(error_class).strip().upper() not in ("", "NONE", "UNKNOWN"):
+        elif error_class and str(error_class).strip().upper() not in (
+            "",
+            "NONE",
+            "UNKNOWN",
+        ):
             # Honour the class the evidence path measured.
             error_type = str(error_class).strip().upper()
         else:
@@ -546,15 +851,77 @@ def verify_prediction(
     }
 
 
+# ── Structural error taxonomy (2026-10-02) ─────────────────────────────────
+# Fallback classifier inputs are BIRTH-side fields only — the verification
+# path honours evidence-measured error_class BEFORE reaching here.
+#
+# RANGE_STALE_AT_MINT enforces the sealed Brent lesson (pred-a1210fe9e53c:
+# "Brent 65–75" minted while spot was 98.3 → "range predictions must be
+# spot-checked against live price at creation"). Naming the cause is what
+# makes the lesson promotable — UNKNOWN-class lessons are diagnostics by
+# design (chron_loop_close arrow_memory_to_policy).
+_RANGE_SUBJECT_RE = re.compile(
+    r"\b(brent|wti|crude|oil|gas|xau|gold|silver|usd|myr|sgd|ron\s?95|ron97|"
+    r"diesel|klci|nasdaq|snp|price|index|yield|rate)\b",
+    re.IGNORECASE,
+)
+_RANGE_CLAIM_RE = re.compile(
+    r"\b(between|under|below|above|at least|at most|no more than|"
+    r"no less than|within the range|range of)\b"
+    r"|[≤≥]\s?\d|\d\s?[-–]\s?\d",
+    re.IGNORECASE,
+)
+
+
 def _classify_error(prediction: dict) -> str:
-    """Classify why a prediction was wrong."""
-    if not prediction.get("assumptions"):
-        return "UNKNOWN"
-    # Default — more specific classification needs domain context
-    return "ASSUMPTION_ERROR"
+    """Classify why a prediction was wrong.
+
+    Priority (honoured upstream before this fallback is reached):
+      1. ``error_class`` measured by the evidence path (chron_verify)
+      2. this structural fallback from birth-side fields only
+
+    Structural classes:
+      ASSUMPTION_ERROR     — assumptions were recorded and one broke
+      RANGE_STALE_AT_MINT  — threshold/range claim on a live-market subject
+                             with no assumptions and no mint-time market
+                             evidence; the range was stale before the clock
+                             started (proven: pred-a1210fe9e53c Brent 65–75
+                             vs spot 98.3; fuel-window family)
+      UNKNOWN              — honest floor; insufficient signal is never
+                             forced into a class
+    """
+    if prediction.get("assumptions"):
+        return "ASSUMPTION_ERROR"
+
+    claim = " ".join(
+        str(prediction.get(k) or "") for k in ("claim", "expected_outcome")
+    )
+    has_range_shape = bool(_RANGE_CLAIM_RE.search(claim))
+    market_subject = bool(_RANGE_SUBJECT_RE.search(claim))
+    # Mint-time market evidence appears as an evidence_snapshot entry whose
+    # evidence_class is richer than a bare EVENT_REFERENCE (e.g. MARKET_PROBE).
+    snap = prediction.get("evidence_snapshot") or []
+    mint_market_evidence = any(
+        isinstance(e, dict)
+        and str(e.get("evidence_class", "")).upper() not in ("", "EVENT_REFERENCE")
+        for e in snap
+    )
+    if has_range_shape and market_subject and not mint_market_evidence:
+        return "RANGE_STALE_AT_MINT"
+    return "UNKNOWN"
 
 
 # ───────────────────────── CALIBRATION ─────────────────────────
+
+
+# NOTE: GUT-OVERRIDE LEDGER (GOL) functions live canonically in
+# chron.chron_gut_override. The duplicate block that previously lived
+# here (added during the 2026-10-04 FI-008 audit response) was
+# removed 2026-10-07 because no caller imports these names from
+# chron_prediction (chron_cron_verify and production code import
+# from chron.chron_gut_override only). Anti-Bangang LAW 8 forbids
+# duplicate governance surfaces. Canonical spec:
+#   /root/AAA/instructions/gut-override-ledger-spec.md
 
 
 def compute_calibration() -> dict:
@@ -689,6 +1056,7 @@ INTERPRETABLE_ERROR_TYPES = (
     "MODEL_ERROR",
     "REGIME_CHANGE",
     "AWAITING_EVIDENCE",
+    "RANGE_STALE_AT_MINT",  # 2026-10-02: structural fallback class (sealed Brent lesson)
 )
 
 
@@ -817,7 +1185,13 @@ def recalibrate_confidence(
 
     if quality == QUALITY_NONE:
         return _outcome(
-            p, False, 0.5, None, 0.0, 0.0, False,
+            p,
+            False,
+            0.5,
+            None,
+            0.0,
+            0.0,
+            False,
             "no decisive verdicts — calibration store empty; proposal passed through unaltered",
         )
 
@@ -828,7 +1202,13 @@ def recalibrate_confidence(
         # cannot attribute a single failure to skill. Applying a correction here
         # would be acting on evidence that does not exist.
         return _outcome(
-            p, False, 0.5, snapshot.get("bias"), 0.0, 0.0, False,
+            p,
+            False,
+            0.5,
+            snapshot.get("bias"),
+            0.0,
+            0.0,
+            False,
             "calibration quality INSUFFICIENT: no interpretable outcome — "
             "correction withheld rather than applied on an unmeasurable base rate",
         )
@@ -843,9 +1223,11 @@ def recalibrate_confidence(
         # silent fallback here would make an overconfident store look unbiased —
         # the one error this function exists to prevent.
         mc = snapshot.get("mean_confidence")
-        bias = (float(mc) - float(accuracy)) if (
-            mc is not None and accuracy is not None
-        ) else None
+        bias = (
+            (float(mc) - float(accuracy))
+            if (mc is not None and accuracy is not None)
+            else None
+        )
     else:
         bias = float(bias)
     delta = bias if (not skill_usable and bias is not None) else 0.0
@@ -860,8 +1242,24 @@ def recalibrate_confidence(
     calibrated = _clamp01(p + shift)
 
     if not skill_usable:
+        # Name the actual failing condition. The old string said
+        # "n=... < 8 and/or error taxonomy blind" even when n was 38 and the
+        # real blocker was blind lesson share. A reason must not misdiagnose.
+        reasons = []
+        if n < min_effective_n:
+            reasons.append(f"n={n} < {min_effective_n}")
+        unknown_share = facts.get("unknown_share")
+        if unknown_share is not None and unknown_share > MAX_UNKNOWN_SHARE:
+            reasons.append(f"unknown_share={unknown_share:.3f} > {MAX_UNKNOWN_SHARE}")
+        blind_share = facts.get("blind_lesson_share")
+        if blind_share is not None and blind_share > MAX_BLIND_LESSON_SHARE:
+            reasons.append(
+                f"blind_lesson_share={blind_share:.3f} > {MAX_BLIND_LESSON_SHARE}"
+            )
+        if not reasons:
+            reasons.append("skill not usable")
         why = (
-            f"INSUFFICIENT (n={n} < {min_effective_n} and/or error taxonomy blind); "
+            f"INSUFFICIENT ({'; '.join(reasons)}); "
             f"anchored on genuine uncertainty 0.5, measured bias direction applied "
             f"at evidence weight {w:.4f}"
         )
@@ -871,7 +1269,9 @@ def recalibrate_confidence(
             f"at evidence weight {w:.4f}"
         )
         if abs(shift) <= 1e-12:
-            why += "; shift is zero — the proposal already equals the measured base rate"
+            why += (
+                "; shift is zero — the proposal already equals the measured base rate"
+            )
     if capped:
         why += f"; shift capped at {cap:.4f}"
 
@@ -928,7 +1328,39 @@ def snapshot_digest(snapshot: Optional[dict]) -> dict:
 # ───────────────────────── GENERATE FROM EVENTS ─────────────────────────
 
 
-def generate_from_chron_events() -> list[dict]:
+def resolve_caller_actor(actor: Optional[str]) -> Optional[str]:
+    """Resolve a caller-supplied actor to a registered lane root, or None.
+
+    WHY THIS EXISTS (2026-10-31, root cause of dormant BL12 calibration)
+    -------------------------------------------------------------------
+    Both emission sites below stamped `created_by` with the MODULE path
+    "chron_prediction.generate_from_chron_events". chron_attribution.observer_of()
+    reads created_by as an authorship field, and a module path is never in
+    KNOWN_AGENTS — so every generated prediction resolved to UNATTRIBUTED and
+    per-actor calibration could never accumulate a routable actor. Measured
+    2026-10-31: per_actor held exactly one key, UNATTRIBUTED, routable=false,
+    quality=INSUFFICIENT_ATTRIBUTION, while the resolver knew 13 agents.
+
+    The field could not carry an actor at all. That is the defect this closes.
+
+    FAIL CLOSED: an unrecognised actor is NOT invented into the record. It is
+    dropped, the module path remains as created_by, and the raw request is kept
+    in `requested_actor` so an unattributed row still says who asked.
+    """
+    if not actor or not isinstance(actor, str):
+        return None
+    key = actor.strip().lower()
+    if not key or key in AUDIENCE_TOKENS:
+        return None
+    if key in KNOWN_AGENTS:
+        return KNOWN_AGENTS[key]
+    root = key.split("/")[0]
+    if root in KNOWN_AGENTS:
+        return KNOWN_AGENTS[root]
+    return None
+
+
+def generate_from_chron_events(actor: Optional[str] = None) -> list[dict]:
     """Generate falsifiable predictions from chron_events.json.
 
     Reads the `predictions[]` array on each event. Each entry carries:
@@ -946,7 +1378,7 @@ def generate_from_chron_events() -> list[dict]:
     generator read neither file: OUTCOME→LEARNING wrote them and nothing read them
     — a ledger, not a loop.
     """
-    chron_events = Path("/root/AAA/scripts/chron_events.json")
+    chron_events = Path("/root/chron/chron_events.json")
     if not chron_events.exists():
         return []
 
@@ -970,11 +1402,9 @@ def generate_from_chron_events() -> list[dict]:
         # An UNKNOWN-class lesson ("Investigate root cause") is the loop reporting
         # its own blindness. It is carried for audit and explicitly NOT applied.
         "policy_applied": False,
-        "policy_note": (
-            "no lesson is applied as policy: none yet meets the promotion gate "
-            "(external validation is not implemented), and blind (UNKNOWN-class) "
-            "lessons are diagnostics, not rules"
-        ),
+        # Derived, never static — see policy_gate_note(). A dead criterion in
+        # this string is governance misrepresentation.
+        "policy_note": policy_gate_note(),
     }
 
     # Track existing source_ids to avoid duplicates (by event id + claim hash)
@@ -1055,12 +1485,22 @@ def generate_from_chron_events() -> list[dict]:
                     threshold_low=sub_pred.get("threshold_low"),
                     threshold_high=sub_pred.get("threshold_high"),
                     unit=sub_pred.get("unit", ""),
+                    # Coverage window for ABSENCE claims ("zero failures for
+                    # 7 days"). Without it, verify_at alone cannot establish
+                    # that the absence held for the whole window.
+                    coverage=sub_pred.get("coverage")
+                    or sub_pred.get("coverage_window"),
                     # ── P0 provenance fields ──
                     evidence_snapshot=evidence_snapshot,
                     source_refs=source_refs,
                     success_rule=success_rule,
                     falsification_rule=falsification_rule,
-                    created_by="chron_prediction.generate_from_chron_events",
+                    created_by=(
+                        resolve_caller_actor(actor)
+                        or "chron_prediction.generate_from_chron_events"
+                    ),
+                    provenance_module="chron_prediction.generate_from_chron_events",
+                    requested_actor=actor or None,
                     trigger="manual_generate",
                     loop_id=None,
                     # ── Learning-hop audit trail (2026-09-21) ──
@@ -1079,13 +1519,33 @@ def generate_from_chron_events() -> list[dict]:
         if dedup_key in existing_keys:
             continue
 
+        # PREDICTED was MISSING from this map until 2026-10-03 (FI-003, D3).
+        # It fell through to the 0.5 default while TENTATIVE scored 0.6, so the
+        # weakest label calibrated ABOVE an actual forecast. Measured effect on
+        # the 2026-10-03 AGI branch set: branch C (asserted amplitude 0.25) and
+        # branch E (0.30) both landed at confidence 0.5412, while branch A
+        # (0.55) landed LOWER at 0.4942 — the ordering inverted, so Brier
+        # scoring would have penalised the confident branch least.
         confidence_map = {
             "CONFIRMED": 0.9,
-            "LIKELY": 0.7,
             "ANNOUNCED": 0.8,
+            "LIKELY": 0.7,
+            "PREDICTED": 0.65,
             "TENTATIVE": 0.6,
         }
-        proposed = float(confidence_map.get(event.get("confidence", ""), 0.5))
+        # An explicit numeric amplitude always wins over the enum. The enum is a
+        # coarse label; the amplitude is the actual claim being scored. Without
+        # this the forecaster's real probability is discarded before
+        # confidence_proposed and the calibrator cannot discriminate.
+        amp = event.get("amplitude")
+        if (
+            isinstance(amp, (int, float))
+            and not isinstance(amp, bool)
+            and 0.0 <= float(amp) <= 1.0
+        ):
+            proposed = float(amp)
+        else:
+            proposed = float(confidence_map.get(event.get("confidence", ""), 0.5))
         outcome = recalibrate_confidence(proposed, snapshot)
 
         pred = create_prediction(
@@ -1115,7 +1575,12 @@ def generate_from_chron_events() -> list[dict]:
             source_refs=[event.get("source", "")] if event.get("source") else [],
             success_rule=f"Event '{title}' occurs by {target_date_str}",
             falsification_rule=f"Event '{title}' does not occur by {target_date_str}",
-            created_by="chron_prediction.generate_from_chron_events",
+            created_by=(
+                resolve_caller_actor(actor)
+                or "chron_prediction.generate_from_chron_events"
+            ),
+            provenance_module="chron_prediction.generate_from_chron_events",
+            requested_actor=actor or None,
             trigger="manual_generate",
             loop_id=None,
             # ── Learning-hop audit trail (2026-09-21) ──
@@ -1141,8 +1606,6 @@ def _load_lessons_for_generation() -> list[dict]:
     try:
         from chron.chron_learn import load_lessons, is_actionable_lesson
 
-        return [
-            {**l, "actionable": is_actionable_lesson(l)} for l in load_lessons()
-        ]
+        return [{**l, "actionable": is_actionable_lesson(l)} for l in load_lessons()]
     except Exception:  # noqa: BLE001
         return []

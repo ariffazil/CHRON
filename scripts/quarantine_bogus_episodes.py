@@ -19,7 +19,7 @@ that happened, they are harness artefacts. The ledger is backed up first, the
 index is rebuilt by the module's own `_rebuild_index()`, and every removed id is
 written to a manifest so the removal is auditable and reversible.
 
-Run: /opt/arifos/venv/bin/python3 /root/chron/scripts/quarantine_bogus_episodes.py [--apply]
+Run: /opt/arifos/.venv/bin/python3 /root/chron/scripts/quarantine_bogus_episodes.py [--apply]
 """
 from __future__ import annotations
 

@@ -126,22 +126,80 @@ def cmd_calibration(args):
 
 
 def cmd_tools(args):
-    from chron_mcp import list_tools
+    """List the canonical 22-tool surface served at :18102."""
+    import asyncio
+    import importlib
 
-    tools = list_tools()
+    server = importlib.import_module("chron.server")
+    tools = asyncio.run(server.mcp.list_tools())
     print(f"CHRON MCP Tools: {len(tools)}")
-    for t in tools:
-        print(f"  {t['name']}: {t['description']}")
+    for t in sorted(tools, key=lambda x: x.name):
+        first_line = (
+            (t.description or "").strip().splitlines()[0] if t.description else ""
+        )
+        print(f"  {t.name}: {first_line[:100]}")
+
+
+def cmd_contracts(args):
+    """Audit resolution contracts: who can decide, and when."""
+    from chron_contract_audit import audit
+
+    report = audit()
+    if "--json" in args:
+        print(json.dumps(report, indent=2, default=str))
+    else:
+        print(json.dumps(report["summary"], indent=2, default=str))
+        print("\nUse --json for one item per prediction.")
+
+
+def cmd_timing(args):
+    """Audit event timing: fresh, due, stale, resolved."""
+    import importlib
+
+    server = importlib.import_module("chron.server")
+    result = server.chron_timing_audit()
+    if "--json" in args:
+        print(json.dumps(result, indent=2, default=str))
+        return
+    print(json.dumps(result["counts"], indent=2))
+    for w in result.get("warnings", [])[:10]:
+        print(f"  {w['event_id']} | {w['timing_status']} | {w.get('warning')}")
 
 
 def cmd_call(args):
-    from chron_mcp import call_tool
+    """Call a CHRON tool from the CLI.
 
+    Resolution order:
+      1. `chron.server` — the same 22-tool surface the MCP process serves at
+         :18102. This is the canonical path; the old `chron_mcp` module only
+         exposed 7 read tools and silently reported the other 14 as unknown.
+      2. `chron_mcp.call_tool` — legacy fallback for names the server does not
+         expose (kept so old scripts do not break).
+
+    Usage: python3 -m chron call <tool_name> [kwargs_json]
+    """
     if not args:
         print("Usage: python3 -m chron call <tool_name> [kwargs_json]")
         return
     tool_name = args[0]
     kwargs = json.loads(args[1]) if len(args) > 1 else {}
+
+    # Names that existed only on the legacy surface.
+    legacy_aliases = {
+        "chron_calibration": "chron_calibration_state",
+    }
+    resolved = legacy_aliases.get(tool_name, tool_name)
+
+    import importlib
+
+    server = importlib.import_module("chron.server")
+    fn = getattr(server, resolved, None)
+    if callable(fn) and resolved.startswith("chron_"):
+        print(json.dumps(fn(**kwargs), indent=2, default=str))
+        return
+
+    from chron_mcp import call_tool
+
     result = call_tool(tool_name, **kwargs)
     print(json.dumps(result, indent=2, default=str))
 
@@ -164,6 +222,8 @@ def main():
         "generate": lambda: cmd_generate(rest),
         "calibration": lambda: cmd_calibration(rest),
         "tools": lambda: cmd_tools(rest),
+        "contracts": lambda: cmd_contracts(rest),
+        "timing": lambda: cmd_timing(rest),
         "call": lambda: cmd_call(rest),
     }
 
