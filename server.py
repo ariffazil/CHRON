@@ -2088,6 +2088,29 @@ def _get_active_events_summary() -> list[dict]:
 # can never be mistaken for a live one. Writers untouched (zero mutation risk).
 _HEALTH_CACHE: dict = {"ts": 0.0, "payload": None}
 
+# Store-existence probe — machine rule 1 (one instrument per truth): every green
+# must be able to go red. SCAR 2026-11-15→2026-11-19: chron_events.json vanished
+# in the data-free-tree sync while /health served status=ok for 4 days and every
+# create/read on the store failed silently. Health now asserts the store.
+CHRON_EVENTS_PATH = Path("/root/chron/chron_events.json")
+
+
+def _events_store_status(path: Path = CHRON_EVENTS_PATH) -> dict:
+    """Probe the human-events store: exists, parseable, non-empty schema."""
+    try:
+        if not path.exists():
+            return {"exists": False, "healthy": False, "events": 0, "error": "missing"}
+        data = json.loads(path.read_text())
+        events = data.get("events", []) if isinstance(data, dict) else data
+        return {"exists": True, "healthy": True, "events": len(events), "error": None}
+    except Exception as e:  # unreadable == dead store, degrade honestly
+        return {
+            "exists": path.exists(),
+            "healthy": False,
+            "events": 0,
+            "error": f"unreadable: {e}",
+        }
+
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request):
@@ -2113,12 +2136,14 @@ async def health(request):
         ]
 
         ad_summary = get_ad_summary()
+        events_store = _events_store_status()
 
         payload = {
-            "status": "ok",
+            "status": "ok" if events_store["healthy"] else "degraded",
             "organ": "CHRON",
             "port": int(os.environ.get("CHRON_MCP_PORT", 18102)),
             "episodes": store.count(),
+            "stores": {"chron_events": events_store},
             "predictions": {
                 "total": len(preds),
                 "active": len(active),
