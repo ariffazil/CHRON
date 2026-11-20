@@ -170,6 +170,95 @@ def challenge_episode(episode: dict) -> dict:
 # ───────────────────────── CLI ─────────────────────────
 
 
+def close_prediction_with_frame(
+    prediction: dict,
+    frame_observation: dict,
+    *,
+    log_path: Path | None = None,
+) -> dict:
+    """Close an operational/staging prediction once using an independent FRAME observation.
+
+    - If already in resolved_ids(), returns ALREADY_CLOSED without writing a duplicate.
+    - If FRAME witness_verdict is UNVERIFIED or missing, leaves open (AWAITING_EVIDENCE)
+      with a clear reason.
+    - Otherwise writes one canonical verification record with decision_reason.
+    """
+    from chron.chron_prediction import VERIFICATION_LOG, resolved_ids, verify_prediction
+
+    pid = prediction.get("prediction_id")
+    if not pid:
+        return {"status": "INVALID", "reason": "prediction_id missing"}
+
+    if pid in resolved_ids():
+        return {
+            "status": "ALREADY_CLOSED",
+            "prediction_id": pid,
+            "reason": "prediction already closed in verification ledger",
+        }
+
+    if not isinstance(frame_observation, dict):
+        return {
+            "status": "AWAITING_EVIDENCE",
+            "prediction_id": pid,
+            "reason": "missing_frame_observation",
+        }
+
+    wv = str(frame_observation.get("witness_verdict") or "").strip().upper()
+    reason = str(frame_observation.get("reason") or "").strip() or "no reason supplied"
+    if wv in ("", "UNVERIFIED"):
+        return {
+            "status": "AWAITING_EVIDENCE",
+            "prediction_id": pid,
+            "witness_verdict": wv or "UNVERIFIED",
+            "reason": f"awaiting_frame_evidence: {reason}",
+        }
+
+    if wv in ("WITNESS_MATCH", "WITNESS_MATCH_UNCHANGED"):
+        correct = True
+        error_class = None
+    elif wv in ("WITNESS_MISMATCH", "WITNESS_VIOLATION"):
+        correct = False
+        error_class = "EVIDENCE_CONTRADICTION"
+    else:
+        return {
+            "status": "AWAITING_EVIDENCE",
+            "prediction_id": pid,
+            "witness_verdict": wv,
+            "reason": f"unrecognized_frame_verdict: {wv}",
+        }
+
+    record = verify_prediction(
+        prediction,
+        observed_outcome=f"FRAME {wv}: {reason}",
+        correct=correct,
+        unverifiable=False,
+        error_class=error_class,
+    )
+    record["evidence_source"] = "FRAME"
+    record["decision_reason"] = reason
+    record["frame_witness"] = {
+        "action_id": frame_observation.get("action_id"),
+        "witness_verdict": wv,
+        "kernel_verdict": frame_observation.get("kernel_verdict"),
+        "executor_receipt_id": frame_observation.get("executor_receipt_id"),
+        "after_sha256": (frame_observation.get("after") or {}).get("sha256"),
+    }
+
+    target_log = log_path or VERIFICATION_LOG
+    target_log.parent.mkdir(parents=True, exist_ok=True)
+    with open(target_log, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, default=str) + "\n")
+
+    return {
+        "status": "CLOSED",
+        "prediction_id": pid,
+        "verdict": record["verdict"],
+        "verification_id": record["verification_id"],
+        "decision_reason": reason,
+        "witness_verdict": wv,
+    }
+
+
 def main() -> int:
     import sys
 

@@ -410,6 +410,11 @@ def compute_attention_debt(items: Optional[list[dict]] = None) -> dict:
             "age_days": round(age_days, 1),
             "ad_contribution": round(ad_contribution, 2),
         }
+        if item.get("source") == "overdue_prediction":
+            scored_item["overdue_days"] = round(age_days, 1)
+            claim_txt = item.get("claim") or "?"
+            if str(item.get("description") or "").startswith("Prediction overdue by "):
+                scored_item["description"] = f"Prediction overdue by {age_days:.0f}d: {claim_txt[:80]}"
         scored.append(scored_item)
 
         # Aggregate by source
@@ -425,6 +430,7 @@ def compute_attention_debt(items: Optional[list[dict]] = None) -> dict:
             by_consequence[cons]["count"] += 1
             by_consequence[cons]["ad"] += ad_contribution
 
+    scored.sort(key=lambda x: (-x["age_days"], -x["ad_contribution"]))
     total_ad = sum(s["ad_contribution"] for s in scored)
     oldest = max(scored, key=lambda x: x["age_days"], default=None)
 

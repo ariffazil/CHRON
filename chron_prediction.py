@@ -281,10 +281,12 @@ def create_prediction(
         # and no explicit human-witness audience is UNBOUND, not ACTIVE.
         # Cron cannot close a door that was never attached.
         "status": (
-            "ACTIVE" if (extra.get("probe_id") or audience == "arif") else "UNBOUND"
+            "ACTIVE"
+            if (extra.get("probe_id") or extra.get("evidence_source") == "FRAME" or audience == "arif")
+            else "UNBOUND"
         ),
         "binding": extra.get("probe_id")
-        or ("HUMAN_WITNESS" if audience == "arif" else "NO_MACHINE_PROBE"),
+        or ("FRAME_WITNESS" if extra.get("evidence_source") == "FRAME" else ("HUMAN_WITNESS" if audience == "arif" else "NO_MACHINE_PROBE")),
         "created_at": _now_iso(),
         # ── Verification payload (written by verify, never by create) ──
         "observed_outcome": None,
@@ -503,17 +505,18 @@ def get_active() -> list[dict]:
 
 
 def get_due() -> list[dict]:
-    """Get predictions whose verify_at has arrived and are still unresolved."""
+    """Get predictions whose verify_at has arrived and are still unresolved, oldest due first."""
     now = datetime.now(timezone.utc)
     due = []
     for p in get_active():
         try:
             verify_at = datetime.fromisoformat(p["verify_at"].replace("Z", "+00:00"))
             if now >= verify_at:
-                due.append(p)
+                due.append((verify_at, p))
         except Exception:
             pass
-    return due
+    due.sort(key=lambda item: item[0])
+    return [p for _, p in due]
 
 
 # ─────────────────── RESOLUTION-PROCESS STATES (read-time) ───────────────────
