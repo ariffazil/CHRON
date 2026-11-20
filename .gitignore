@@ -24,3 +24,7 @@ data/.archive/
 artifacts/
 *.db
 *.sqlite*
+
+# runtime offsets (churn, not content) — F13 repo-hygiene 2026-11-21
+data/.flow_offset
+data/arifflow_offset.txt
