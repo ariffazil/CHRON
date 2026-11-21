@@ -1,7 +1,7 @@
 <!-- SOT-MANIFEST
 owner: Muhammad Arif bin Fazil (F13 SOVEREIGN)
-federation_release: v2026.11.18
-last_verified: 2026-11-18T07:56:51Z
+federation_release: v2026.11.21
+last_verified: 2026-11-21T13:16:00Z
 organ: CHRON
 role: The Measure (Time) — temporal_consequence_tracker
 doctrine: "Demi masa. Time is the witness. CHRON predicts, verifies, calibrates, and tracks attention debt. Never a scheduler. Never a memory owner."
